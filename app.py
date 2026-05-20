@@ -27,13 +27,21 @@ st.set_page_config(
 
 
 PERIOD_OPTIONS = {
-    "1개월": "1mo",
-    "3개월": "3mo",
-    "6개월": "6mo",
+    "1일": "1d",
+    "1주": "5d",
+    "3달": "3mo",
     "1년": "1y",
-    "3년": "3y",
     "5년": "5y",
     "최대": "max",
+}
+
+SIMPLE_INTERVAL_BY_PERIOD = {
+    "1일": "5m",
+    "1주": "30m",
+    "3달": "1d",
+    "1년": "1d",
+    "5년": "1wk",
+    "최대": "1mo",
 }
 
 INTERVAL_OPTIONS = {
@@ -1662,7 +1670,8 @@ def render_sidebar() -> dict[str, Any]:
 
         if chart_mode == "간단한 차트":
             period_label = st.selectbox("기간 선택", list(PERIOD_OPTIONS.keys()), index=3)
-            interval_label = "일봉"
+            interval_label = "자동"
+            interval = SIMPLE_INTERVAL_BY_PERIOD.get(period_label, "1d")
             ma_settings = []
             show_volume = False
             show_rsi = False
@@ -1670,6 +1679,7 @@ def render_sidebar() -> dict[str, Any]:
         else:
             period_label = "최대"
             interval_label = st.selectbox("봉 종류", list(INTERVAL_OPTIONS.keys()), index=0)
+            interval = INTERVAL_OPTIONS[interval_label]
             show_volume = st.checkbox("거래량 표시", value=True)
 
             st.divider()
@@ -1688,7 +1698,7 @@ def render_sidebar() -> dict[str, Any]:
         "period_label": period_label,
         "period": PERIOD_OPTIONS[period_label],
         "interval_label": interval_label,
-        "interval": INTERVAL_OPTIONS[interval_label],
+        "interval": interval,
         "chart_type": chart_type,
         "ma_settings": ma_settings,
         "show_volume": show_volume,
@@ -1813,6 +1823,505 @@ def calculate_volume_axis_range(price_data: pd.DataFrame, x_range: list[Any] | N
     if max_volume <= 0:
         return None
     return [0, max_volume * 1.15]
+
+
+def json_safe_number(value: Any) -> float | None:
+    number = clean_float(value)
+    return number if number is not None else None
+
+
+def timestamp_to_epoch_ms(value: Any) -> int:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert("UTC")
+    else:
+        timestamp = timestamp.tz_localize("UTC")
+    return int(timestamp.timestamp() * 1000)
+
+
+def series_to_json_values(series: pd.Series) -> list[float | None]:
+    return [json_safe_number(value) for value in series]
+
+
+def build_detailed_chart_payload(
+    price_data: pd.DataFrame,
+    settings: dict[str, Any],
+    ma_colors: list[str],
+) -> dict[str, Any]:
+    data = price_data.sort_index().copy()
+    timestamps = [timestamp_to_epoch_ms(value) for value in data.index]
+    x_values = [
+        pd.Timestamp(value, unit="ms", tz="UTC").isoformat().replace("+00:00", "Z")
+        for value in timestamps
+    ]
+
+    mas: list[dict[str, Any]] = []
+    for idx, ma in enumerate(settings.get("ma_settings", [])):
+        if not ma.get("enabled"):
+            continue
+        window = int(ma.get("window", 20))
+        ma_series = calculate_moving_average(data, window)
+        mas.append(
+            {
+                "name": f"MA {window}",
+                "color": ma_colors[idx % len(ma_colors)],
+                "values": series_to_json_values(ma_series),
+            }
+        )
+
+    rsi_series = calculate_rsi(data, int(settings.get("rsi_period", 14)))
+    initial_range = get_initial_detailed_chart_range(data, settings.get("interval", "1d"))
+    initial_range_ms = (
+        [timestamp_to_epoch_ms(initial_range[0]), timestamp_to_epoch_ms(initial_range[1])]
+        if initial_range
+        else [timestamps[0], timestamps[-1]]
+    )
+
+    return {
+        "chartType": settings.get("chart_type", "캔들차트"),
+        "showVolume": bool(settings.get("show_volume")),
+        "showRsi": bool(settings.get("show_rsi")),
+        "rsiPeriod": int(settings.get("rsi_period", 14)),
+        "initialRange": initial_range_ms,
+        "data": {
+            "t": timestamps,
+            "x": x_values,
+            "open": series_to_json_values(data.get("Open", pd.Series(index=data.index, dtype=float))),
+            "high": series_to_json_values(data.get("High", pd.Series(index=data.index, dtype=float))),
+            "low": series_to_json_values(data.get("Low", pd.Series(index=data.index, dtype=float))),
+            "close": series_to_json_values(data.get("Close", pd.Series(index=data.index, dtype=float))),
+            "volume": series_to_json_values(data.get("Volume", pd.Series(index=data.index, dtype=float))),
+        },
+        "mas": mas,
+        "rsi": series_to_json_values(rsi_series),
+    }
+
+
+def render_virtualized_detailed_chart(ticker: str, price_data: pd.DataFrame, settings: dict[str, Any]) -> None:
+    ma_colors = [
+        "#f59e0b",
+        "#10b981",
+        "#7c3aed",
+        "#ef4444",
+        "#0891b2",
+        "#a16207",
+        "#db2777",
+        "#16a34a",
+    ]
+    chart_payload = build_detailed_chart_payload(price_data, settings, ma_colors)
+    chart_json = json.dumps(chart_payload, ensure_ascii=False, allow_nan=False).replace("</", "<\\/")
+    safe_ticker = re.sub(r"[^A-Za-z0-9_-]+", "-", display_ticker(ticker)).strip("-") or "stock"
+    div_id = f"virtualized-stock-chart-{safe_ticker.lower()}"
+    chart_height = 780
+    mobile_height = 640
+    html = f"""
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <style>
+        html, body {{
+            background: transparent;
+            margin: 0;
+            overflow: hidden;
+            padding: 0;
+        }}
+        #{div_id} {{
+            height: {chart_height}px;
+            touch-action: none;
+            width: 100%;
+        }}
+        .modebar {{
+            display: none !important;
+        }}
+        @media (max-width: 768px) {{
+            #{div_id} {{
+                height: {mobile_height}px;
+            }}
+            .legend text {{
+                font-size: 10px !important;
+            }}
+        }}
+    </style>
+    <div id="{div_id}"></div>
+    <script>
+    (function () {{
+        const chart = {chart_json};
+        const gd = document.getElementById("{div_id}");
+        const source = chart.data;
+        const config = {{
+            displayModeBar: false,
+            displaylogo: false,
+            doubleClick: "reset",
+            responsive: true,
+            scrollZoom: true
+        }};
+        const rows = buildRows();
+        let viewport = chart.initialRange.slice();
+        let manualRanges = {{}};
+        let rendering = false;
+        let pendingTimer = null;
+
+        function buildRows() {{
+            const result = [{{ kind: "price", x: "x", y: "y", xLayout: "xaxis", yLayout: "yaxis", title: "가격" }}];
+            if (chart.showVolume) {{
+                const suffix = result.length + 1;
+                result.push({{ kind: "volume", x: "x" + suffix, y: "y" + suffix, xLayout: "xaxis" + suffix, yLayout: "yaxis" + suffix, title: "거래량" }});
+            }}
+            if (chart.showRsi) {{
+                const suffix = result.length + 1;
+                result.push({{ kind: "rsi", x: "x" + suffix, y: "y" + suffix, xLayout: "xaxis" + suffix, yLayout: "yaxis" + suffix, title: "RSI" }});
+            }}
+            return result;
+        }}
+
+        function toTime(value) {{
+            if (typeof value === "number") return value;
+            const parsed = new Date(value).getTime();
+            return Number.isFinite(parsed) ? parsed : NaN;
+        }}
+
+        function axisSuffix(axisLayout) {{
+            return axisLayout.replace("xaxis", "");
+        }}
+
+        function xTraceName(row) {{
+            return row.x === "x" ? "x" : row.x;
+        }}
+
+        function yTraceName(row) {{
+            return row.y === "y" ? "y" : row.y;
+        }}
+
+        function binaryLeft(values, target) {{
+            let low = 0;
+            let high = values.length;
+            while (low < high) {{
+                const mid = Math.floor((low + high) / 2);
+                if (values[mid] < target) low = mid + 1;
+                else high = mid;
+            }}
+            return low;
+        }}
+
+        function binaryRight(values, target) {{
+            let low = 0;
+            let high = values.length;
+            while (low < high) {{
+                const mid = Math.floor((low + high) / 2);
+                if (values[mid] <= target) low = mid + 1;
+                else high = mid;
+            }}
+            return low;
+        }}
+
+        function getVisibleBounds() {{
+            let start = Math.min(viewport[0], viewport[1]);
+            let end = Math.max(viewport[0], viewport[1]);
+            if (!Number.isFinite(start) || !Number.isFinite(end) || start === end) {{
+                start = source.t[Math.max(0, source.t.length - 252)];
+                end = source.t[source.t.length - 1];
+                viewport = [start, end];
+            }}
+
+            let startIndex = binaryLeft(source.t, start);
+            let endIndex = binaryRight(source.t, end);
+            if (startIndex >= endIndex) {{
+                const nearest = Math.max(0, Math.min(source.t.length - 1, startIndex));
+                startIndex = Math.max(0, nearest - 1);
+                endIndex = Math.min(source.t.length, nearest + 2);
+            }}
+            return {{ start, end, startIndex, endIndex }};
+        }}
+
+        function slice(values, bounds) {{
+            return values.slice(bounds.startIndex, bounds.endIndex);
+        }}
+
+        function cleanNumbers(values) {{
+            return values.map(Number).filter((value) => Number.isFinite(value));
+        }}
+
+        function paddedRange(values, axisType) {{
+            const clean = cleanNumbers(values);
+            if (!clean.length) return null;
+            const minValue = Math.min(...clean);
+            const maxValue = Math.max(...clean);
+            const padding = minValue === maxValue
+                ? Math.max(Math.abs(maxValue) * 0.02, 0.01)
+                : Math.max((maxValue - minValue) * 0.08, Math.abs((maxValue + minValue) / 2) * 0.002, 0.01);
+            let lower = minValue - padding;
+            if (axisType === "price" && minValue > 0 && lower <= 0) lower = minValue * 0.9;
+            return [lower, maxValue + padding];
+        }}
+
+        function rowByKind(kind) {{
+            return rows.find((row) => row.kind === kind);
+        }}
+
+        function priceRange(bounds) {{
+            const values = [];
+            values.push(...slice(source.high, bounds), ...slice(source.low, bounds));
+            chart.mas.forEach((ma) => values.push(...slice(ma.values, bounds)));
+            return paddedRange(values, "price");
+        }}
+
+        function volumeRange(bounds) {{
+            const values = cleanNumbers(slice(source.volume, bounds));
+            if (!values.length) return [0, 1];
+            return [0, Math.max(...values) * 1.15];
+        }}
+
+        function visibleXAxisRange(bounds) {{
+            return [
+                new Date(bounds.start).toISOString(),
+                new Date(bounds.end).toISOString()
+            ];
+        }}
+
+        function domainFor(index, total) {{
+            if (total === 1) return [0, 1];
+            if (total === 2) return index === 0 ? [0.29, 1] : [0, 0.21];
+            return index === 0 ? [0.40, 1] : (index === 1 ? [0.20, 0.34] : [0, 0.15]);
+        }}
+
+        function makeTraceData(bounds) {{
+            const xValues = slice(source.x, bounds);
+            const traces = [];
+            const priceRow = rowByKind("price");
+            if (chart.chartType === "캔들차트") {{
+                traces.push({{
+                    type: "candlestick",
+                    x: xValues,
+                    open: slice(source.open, bounds),
+                    high: slice(source.high, bounds),
+                    low: slice(source.low, bounds),
+                    close: slice(source.close, bounds),
+                    increasing: {{ line: {{ color: "#dc2626" }} }},
+                    decreasing: {{ line: {{ color: "#2563eb" }} }},
+                    name: "가격",
+                    xaxis: xTraceName(priceRow),
+                    yaxis: yTraceName(priceRow)
+                }});
+            }} else {{
+                traces.push({{
+                    type: "scattergl",
+                    mode: "lines",
+                    x: xValues,
+                    y: slice(source.close, bounds),
+                    line: {{ color: "#1d4ed8", width: 2 }},
+                    name: "종가",
+                    xaxis: xTraceName(priceRow),
+                    yaxis: yTraceName(priceRow)
+                }});
+            }}
+
+            chart.mas.forEach((ma) => {{
+                traces.push({{
+                    type: "scattergl",
+                    mode: "lines",
+                    x: xValues,
+                    y: slice(ma.values, bounds),
+                    line: {{ color: ma.color, width: 1.6 }},
+                    name: ma.name,
+                    xaxis: xTraceName(priceRow),
+                    yaxis: yTraceName(priceRow)
+                }});
+            }});
+
+            const volumeRow = rowByKind("volume");
+            if (volumeRow) {{
+                const close = slice(source.close, bounds);
+                const colors = close.map((value, index) => {{
+                    const previous = index > 0 ? close[index - 1] : value;
+                    return Number(value) >= Number(previous) ? "#ef4444" : "#3b82f6";
+                }});
+                traces.push({{
+                    type: "bar",
+                    x: xValues,
+                    y: slice(source.volume, bounds),
+                    marker: {{ color: colors }},
+                    opacity: 0.48,
+                    name: "거래량",
+                    xaxis: xTraceName(volumeRow),
+                    yaxis: yTraceName(volumeRow)
+                }});
+            }}
+
+            const rsiRow = rowByKind("rsi");
+            if (rsiRow) {{
+                traces.push({{
+                    type: "scattergl",
+                    mode: "lines",
+                    x: xValues,
+                    y: slice(chart.rsi, bounds),
+                    line: {{ color: "#475569", width: 1.5 }},
+                    name: "RSI " + chart.rsiPeriod,
+                    xaxis: xTraceName(rsiRow),
+                    yaxis: yTraceName(rsiRow)
+                }});
+                traces.push({{
+                    type: "scattergl",
+                    mode: "lines",
+                    x: visibleXAxisRange(bounds),
+                    y: [70, 70],
+                    line: {{ color: "#dc2626", dash: "dash", width: 1.4 }},
+                    hoverinfo: "skip",
+                    showlegend: false,
+                    xaxis: xTraceName(rsiRow),
+                    yaxis: yTraceName(rsiRow)
+                }});
+                traces.push({{
+                    type: "scattergl",
+                    mode: "lines",
+                    x: visibleXAxisRange(bounds),
+                    y: [30, 30],
+                    line: {{ color: "#2563eb", dash: "dash", width: 1.4 }},
+                    hoverinfo: "skip",
+                    showlegend: false,
+                    xaxis: xTraceName(rsiRow),
+                    yaxis: yTraceName(rsiRow)
+                }});
+            }}
+            return traces;
+        }}
+
+        function makeLayout(bounds) {{
+            const xRange = visibleXAxisRange(bounds);
+            const layout = {{
+                dragmode: "pan",
+                height: window.innerWidth <= 768 ? {mobile_height} : {chart_height},
+                hovermode: "x",
+                margin: {{ l: 44, r: 20, t: 44, b: 36 }},
+                paper_bgcolor: "white",
+                plot_bgcolor: "white",
+                showlegend: true,
+                template: "plotly_white",
+                legend: {{ orientation: "h", yanchor: "bottom", y: 1.02, xanchor: "right", x: 1, font: {{ size: 11 }} }},
+                annotations: []
+            }};
+
+            rows.forEach((row, index) => {{
+                const isBottom = index === rows.length - 1;
+                const xKey = row.xLayout;
+                const yKey = row.yLayout;
+                layout[xKey] = {{
+                    anchor: row.y,
+                    domain: [0, 1],
+                    fixedrange: false,
+                    range: xRange,
+                    showticklabels: isBottom,
+                    showgrid: true,
+                    gridcolor: "#e2e8f0",
+                    zeroline: false
+                }};
+                const yRange = row.kind === "price"
+                    ? priceRange(bounds)
+                    : (row.kind === "volume" ? volumeRange(bounds) : [0, 100]);
+                layout[yKey] = {{
+                    anchor: row.x,
+                    domain: domainFor(index, rows.length),
+                    fixedrange: false,
+                    gridcolor: "#e2e8f0",
+                    tickformat: row.kind === "volume" ? ",.0f" : ",.2f",
+                    zeroline: false,
+                    range: manualRanges[yKey] || yRange
+                }};
+                if (row.kind === "rsi") layout[yKey].tickformat = "";
+                layout.annotations.push({{
+                    text: row.title,
+                    showarrow: false,
+                    x: 0.5,
+                    xref: "paper",
+                    y: domainFor(index, rows.length)[1] + 0.025,
+                    yref: "paper",
+                    font: {{ color: "#64748b", size: 13 }}
+                }});
+            }});
+            return layout;
+        }}
+
+        function parseAxisRange(eventData, axisLayout) {{
+            const direct = eventData[axisLayout + ".range"];
+            if (Array.isArray(direct) && direct.length >= 2) return [toTime(direct[0]), toTime(direct[1])];
+            const start = eventData[axisLayout + ".range[0]"];
+            const end = eventData[axisLayout + ".range[1]"];
+            if (start !== undefined && end !== undefined) return [toTime(start), toTime(end)];
+            return null;
+        }}
+
+        function parseNumericAxisRange(eventData, axisLayout) {{
+            const direct = eventData[axisLayout + ".range"];
+            if (Array.isArray(direct) && direct.length >= 2) return direct.map(Number);
+            const start = eventData[axisLayout + ".range[0]"];
+            const end = eventData[axisLayout + ".range[1]"];
+            if (start !== undefined && end !== undefined) return [Number(start), Number(end)];
+            return null;
+        }}
+
+        function applyRelayout(eventData) {{
+            if (!eventData || rendering) return false;
+            let changed = false;
+            let xChanged = false;
+            rows.forEach((row) => {{
+                const xRange = parseAxisRange(eventData, row.xLayout);
+                if (xRange && Number.isFinite(xRange[0]) && Number.isFinite(xRange[1])) {{
+                    viewport = [Math.min(xRange[0], xRange[1]), Math.max(xRange[0], xRange[1])];
+                    changed = true;
+                    xChanged = true;
+                }}
+            }});
+
+            rows.forEach((row) => {{
+                const yRange = parseNumericAxisRange(eventData, row.yLayout);
+                if (!xChanged && yRange && Number.isFinite(yRange[0]) && Number.isFinite(yRange[1])) {{
+                    manualRanges[row.yLayout] = [yRange[0], yRange[1]];
+                    changed = true;
+                }}
+
+                if (eventData[row.yLayout + ".autorange"]) {{
+                    delete manualRanges[row.yLayout];
+                    changed = true;
+                }}
+            }});
+            if (Object.keys(eventData).some((key) => key.includes(".autorange"))) {{
+                if (Object.keys(eventData).some((key) => key.startsWith("xaxis"))) {{
+                    viewport = chart.initialRange.slice();
+                    changed = true;
+                }}
+            }}
+            return changed;
+        }}
+
+        function render() {{
+            const bounds = getVisibleBounds();
+            rendering = true;
+            return Plotly.react(gd, makeTraceData(bounds), makeLayout(bounds), config).finally(() => {{
+                rendering = false;
+            }});
+        }}
+
+        function scheduleRender(delay = 0) {{
+            window.clearTimeout(pendingTimer);
+            pendingTimer = window.setTimeout(render, delay);
+        }}
+
+        function installHandlers() {{
+            gd.on("plotly_relayout", (eventData) => {{
+                if (applyRelayout(eventData)) scheduleRender(0);
+            }});
+            gd.on("plotly_relayouting", (eventData) => {{
+                if (applyRelayout(eventData)) scheduleRender(70);
+            }});
+            window.addEventListener("resize", () => scheduleRender(100));
+        }}
+
+        render().then(installHandlers);
+    }})();
+    </script>
+    """
+    components.html(html, height=chart_height, scrolling=False)
+    st.caption(
+        "현재 보이는 날짜 구간만 렌더링합니다. 좌우 드래그로 이동하고, 위아래 드래그로 가격축을 직접 조정할 수 있습니다. 더블클릭하면 축이 초기화됩니다."
+    )
 
 
 def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> None:
@@ -2236,6 +2745,21 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     is_detailed_chart = settings["chart_mode"] == "자세한 차트"
     show_volume = bool(settings.get("show_volume")) and is_detailed_chart
     show_rsi = bool(settings.get("show_rsi")) and is_detailed_chart
+    if is_detailed_chart:
+        render_virtualized_detailed_chart(ticker, price_data, settings)
+        if show_rsi:
+            full_rsi = calculate_rsi(price_data, settings["rsi_period"])
+            latest_rsi = full_rsi.dropna().iloc[-1] if not full_rsi.dropna().empty else None
+            if latest_rsi is None:
+                st.info("RSI 계산에 필요한 데이터가 부족합니다.")
+            elif latest_rsi >= 70:
+                st.warning(f"최근 RSI는 {latest_rsi:.1f}입니다. 70 이상은 일반적으로 과매수 구간으로 참고됩니다.")
+            elif latest_rsi <= 30:
+                st.info(f"최근 RSI는 {latest_rsi:.1f}입니다. 30 이하는 일반적으로 과매도 구간으로 참고됩니다.")
+            else:
+                st.caption(f"최근 RSI는 {latest_rsi:.1f}입니다. 30~70 구간은 중립 구간으로 해석하는 경우가 많습니다.")
+        return
+
     chart_data = limit_chart_data_for_rendering(price_data, settings["interval"], detailed=is_detailed_chart)
     initial_x_range = get_initial_detailed_chart_range(chart_data, settings["interval"]) if is_detailed_chart else None
 
