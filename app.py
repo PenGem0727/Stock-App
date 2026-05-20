@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from html import escape
 from typing import Any, Iterable
 
@@ -10,7 +11,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 import yfinance as yf
 from bs4 import BeautifulSoup
 from plotly.subplots import make_subplots
@@ -159,6 +159,71 @@ MAJOR_US_LISTED_TICKERS = [
     "UNP",
     "BLK",
 ]
+
+MAJOR_TICKER_SECTORS = {
+    "AAPL": "Technology",
+    "MSFT": "Technology",
+    "NVDA": "Technology",
+    "AMZN": "Consumer Discretionary",
+    "GOOGL": "Communication Services",
+    "GOOG": "Communication Services",
+    "META": "Communication Services",
+    "BRK-B": "Financials",
+    "LLY": "Health Care",
+    "AVGO": "Technology",
+    "TSM": "Technology",
+    "TSLA": "Consumer Discretionary",
+    "JPM": "Financials",
+    "V": "Financials",
+    "UNH": "Health Care",
+    "XOM": "Energy",
+    "MA": "Financials",
+    "COST": "Consumer Staples",
+    "NFLX": "Communication Services",
+    "WMT": "Consumer Staples",
+    "PG": "Consumer Staples",
+    "JNJ": "Health Care",
+    "HD": "Consumer Discretionary",
+    "ORCL": "Technology",
+    "ABBV": "Health Care",
+    "BAC": "Financials",
+    "KO": "Consumer Staples",
+    "CRM": "Technology",
+    "AMD": "Technology",
+    "PLTR": "Technology",
+    "CSCO": "Technology",
+    "CVX": "Energy",
+    "MRK": "Health Care",
+    "PEP": "Consumer Staples",
+    "TMO": "Health Care",
+    "LIN": "Materials",
+    "ADBE": "Technology",
+    "MCD": "Consumer Discretionary",
+    "IBM": "Technology",
+    "QCOM": "Technology",
+    "WFC": "Financials",
+    "ABT": "Health Care",
+    "DIS": "Communication Services",
+    "INTU": "Technology",
+    "PM": "Consumer Staples",
+    "TXN": "Technology",
+    "AMGN": "Health Care",
+    "CAT": "Industrials",
+    "ISRG": "Health Care",
+    "NOW": "Technology",
+    "GS": "Financials",
+    "UBER": "Industrials",
+    "RTX": "Industrials",
+    "MS": "Financials",
+    "NEE": "Utilities",
+    "HON": "Industrials",
+    "BKNG": "Consumer Discretionary",
+    "SPGI": "Financials",
+    "LOW": "Consumer Discretionary",
+    "PFE": "Health Care",
+    "UNP": "Industrials",
+    "BLK": "Financials",
+}
 
 YAHOO_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -490,12 +555,14 @@ def yahoo_get_json(url: str, params: dict[str, Any] | None = None, *, use_crumb:
 def get_yahoo_chart_payload(ticker: str, period: str, interval: str) -> dict[str, Any]:
     symbol = normalize_ticker(ticker)
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {
-        "range": period,
-        "interval": interval,
-        "events": "history",
-        "includePrePost": "false",
-    }
+    params = {"interval": interval, "events": "history", "includePrePost": "false"}
+    if period == "max":
+        # Yahoo's range=max endpoint can downsample every interval into sparse monthly/quarterly data.
+        # period1/period2 preserves the selected candle interval for detailed chart navigation.
+        params["period1"] = 0
+        params["period2"] = int(time.time())
+    else:
+        params["range"] = period
     try:
         data = yahoo_get_json(url, params=params)
         result = data.get("chart", {}).get("result") or []
@@ -568,6 +635,34 @@ def get_yahoo_quote_batch(symbols: tuple[str, ...]) -> dict[str, dict[str, Any]]
 
 def get_yahoo_quote_snapshot(symbol: str) -> dict[str, Any]:
     return get_yahoo_quote_batch((normalize_ticker(symbol),)).get(normalize_ticker(symbol), {})
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_live_quote_info(ticker: str, refresh_bucket: int = 0) -> dict[str, Any]:
+    symbol = normalize_ticker(ticker)
+    url = "https://query1.finance.yahoo.com/v7/finance/quote"
+    try:
+        data = yahoo_get_json(url, {"symbols": symbol}, use_crumb=True)
+        result = data.get("quoteResponse", {}).get("result") or []
+        quote = result[0] if result else {}
+    except Exception:
+        quote = {}
+
+    if not quote:
+        return {}
+    return {
+        "currentPrice": quote.get("regularMarketPrice"),
+        "regularMarketPrice": quote.get("regularMarketPrice"),
+        "previousClose": quote.get("regularMarketPreviousClose"),
+        "regularMarketPreviousClose": quote.get("regularMarketPreviousClose"),
+        "marketCap": quote.get("marketCap"),
+        "fiftyTwoWeekHigh": quote.get("fiftyTwoWeekHigh"),
+        "fiftyTwoWeekLow": quote.get("fiftyTwoWeekLow"),
+        "volume": quote.get("regularMarketVolume"),
+        "regularMarketVolume": quote.get("regularMarketVolume"),
+        "currency": quote.get("currency"),
+        "financialCurrency": quote.get("financialCurrency"),
+    }
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
@@ -824,6 +919,33 @@ def build_price_summary(info: dict[str, Any], price_data: pd.DataFrame) -> dict[
         "volume": first_valid(info.get("volume"), info.get("regularMarketVolume"), info.get("fast_volume"), latest_volume),
         "market_cap": first_valid(info.get("marketCap"), info.get("fast_market_cap")),
     }
+
+
+def render_price_summary_cards(ticker: str, info: dict[str, Any], price_data: pd.DataFrame, settings: dict[str, Any]) -> None:
+    def draw_cards(latest_info: dict[str, Any]) -> None:
+        summary = build_price_summary(latest_info, price_data)
+        metric_cols = st.columns(5)
+        metric_cols[0].metric("현재가", format_price(summary["current_price"], summary["currency"]))
+        metric_cols[1].metric(
+            "전일 대비 등락률",
+            format_percent(summary["change_pct"], already_percent=True),
+        )
+        metric_cols[2].metric("52주 최고가", format_price(summary["year_high"], summary["currency"]))
+        metric_cols[3].metric("52주 최저가", format_price(summary["year_low"], summary["currency"]))
+        metric_cols[4].metric("거래량", format_number(summary["volume"], compact=True))
+
+    refresh_seconds = int(settings.get("auto_refresh_seconds", 0) or 0)
+    if refresh_seconds <= 0:
+        draw_cards(info)
+        return
+
+    @st.fragment(run_every=f"{refresh_seconds}s")
+    def quote_cards_fragment() -> None:
+        live_bucket = int(time.time() // refresh_seconds)
+        live_info = merge_missing(get_live_quote_info(ticker, live_bucket), info)
+        draw_cards(live_info)
+
+    quote_cards_fragment()
 
 
 def read_statement_from_attrs(stock: yf.Ticker, attrs: Iterable[str]) -> pd.DataFrame:
@@ -1186,7 +1308,7 @@ def get_major_ticker_frame() -> pd.DataFrame:
             "Symbol": MAJOR_US_LISTED_TICKERS,
             "YFinanceSymbol": MAJOR_US_LISTED_TICKERS,
             "Security": "",
-            "GICS Sector": "",
+            "GICS Sector": [MAJOR_TICKER_SECTORS.get(symbol, "") for symbol in MAJOR_US_LISTED_TICKERS],
             "Source": "Major US-listed list",
         }
     )
@@ -1292,6 +1414,12 @@ def fetch_market_snapshot(symbol: str, need_profile: bool = False) -> dict[str, 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def get_market_cap_ranking(source: str = "major") -> pd.DataFrame:
     constituents = get_sp500_tickers() if source == "sp500" else get_major_ticker_frame()
+    sector_lookup = {
+        normalize_ticker(str(row["Symbol"])): row.get("GICS Sector")
+        for _, row in constituents.iterrows()
+        if not is_missing(row.get("GICS Sector"))
+    }
+    sector_lookup.update(MAJOR_TICKER_SECTORS)
     yf_symbols = tuple(str(value).replace(".", "-") for value in constituents.get("YFinanceSymbol", constituents["Symbol"]))
     quote_batch = get_yahoo_quote_batch(tuple(normalize_ticker(symbol) for symbol in yf_symbols))
     rows: list[dict[str, Any]] = []
@@ -1323,7 +1451,13 @@ def get_market_cap_ranking(source: str = "major") -> pd.DataFrame:
                 "ticker": display_ticker(symbol),
                 "yf_symbol": yf_symbol,
                 "name": first_valid(item.get("Security"), snapshot.get("name"), "확인 불가"),
-                "sector": first_valid(item.get("GICS Sector"), snapshot.get("sector"), "확인 불가"),
+                "sector": first_valid(
+                    item.get("GICS Sector"),
+                    sector_lookup.get(normalize_ticker(symbol)),
+                    sector_lookup.get(normalize_ticker(yf_symbol)),
+                    snapshot.get("sector"),
+                    "확인 불가",
+                ),
                 "market_cap": market_cap,
                 "current_price": current_price,
                 "change_pct": change_pct,
@@ -1409,22 +1543,6 @@ def render_moving_average_controls() -> list[dict[str, Any]]:
     return ma_settings
 
 
-def inject_auto_refresh(seconds: int) -> None:
-    if seconds <= 0:
-        return
-    components.html(
-        f"""
-        <script>
-        const refreshMs = {seconds * 1000};
-        window.setTimeout(() => {{
-            window.parent.location.reload();
-        }}, refreshMs);
-        </script>
-        """,
-        height=0,
-    )
-
-
 def render_sidebar() -> dict[str, Any]:
     with st.sidebar:
         st.header("분석 설정")
@@ -1437,8 +1555,8 @@ def render_sidebar() -> dict[str, Any]:
         auto_refresh_label = st.selectbox(
             "자동 새로고침",
             list(AUTO_REFRESH_OPTIONS.keys()),
-            index=0,
-            help="선택한 간격마다 페이지를 자동으로 새로고침합니다.",
+            index=1,
+            help="선택한 간격마다 주요 데이터 영역을 조용히 갱신합니다.",
         )
         st.divider()
 
@@ -1500,16 +1618,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         st.warning("선택한 조건에 해당하는 주가 데이터가 없습니다.")
         return
 
-    summary = build_price_summary(info, price_data)
-    metric_cols = st.columns(5)
-    metric_cols[0].metric("현재가", format_price(summary["current_price"], summary["currency"]))
-    metric_cols[1].metric(
-        "전일 대비 등락률",
-        format_percent(summary["change_pct"], already_percent=True),
-    )
-    metric_cols[2].metric("52주 최고가", format_price(summary["year_high"], summary["currency"]))
-    metric_cols[3].metric("52주 최저가", format_price(summary["year_low"], summary["currency"]))
-    metric_cols[4].metric("거래량", format_number(summary["volume"], compact=True))
+    render_price_summary_cards(ticker, info, price_data, settings)
 
     is_detailed_chart = settings["chart_mode"] == "자세한 차트"
     show_volume = bool(settings.get("show_volume")) and is_detailed_chart
@@ -1881,12 +1990,7 @@ def safe_render(render_func: Any, *args: Any) -> None:
         st.caption(f"오류 내용: {exc}")
 
 
-def main() -> None:
-    apply_custom_style()
-    settings = render_sidebar()
-    inject_auto_refresh(settings["auto_refresh_seconds"])
-    render_header()
-
+def render_dashboard_tabs(settings: dict[str, Any]) -> None:
     tabs = st.tabs(["종목 차트", "재무제표", "기업 개요", "밸류에이션", "시가총액 순위"])
     with tabs[0]:
         safe_render(render_chart_tab, settings["ticker"], settings)
@@ -1898,6 +2002,13 @@ def main() -> None:
         safe_render(render_valuation_tab, settings["ticker"])
     with tabs[4]:
         safe_render(render_market_cap_tab)
+
+
+def main() -> None:
+    apply_custom_style()
+    settings = render_sidebar()
+    render_header()
+    render_dashboard_tabs(settings)
 
     st.divider()
     st.caption("본 앱은 투자 참고용이며, 매수·매도 추천이 아닙니다. 데이터는 yfinance와 공개 웹 데이터에 의존하므로 지연, 누락, 오류가 있을 수 있습니다.")
