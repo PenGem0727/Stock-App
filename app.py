@@ -1625,6 +1625,75 @@ def get_initial_detailed_chart_range(price_data: pd.DataFrame, interval: str) ->
     return [valid_index[start_position], valid_index[-1]]
 
 
+def get_visible_price_data(price_data: pd.DataFrame, x_range: list[Any] | None) -> pd.DataFrame:
+    if price_data.empty or x_range is None:
+        return price_data
+    start, end = x_range
+    return price_data.loc[(price_data.index >= start) & (price_data.index <= end)]
+
+
+def calculate_price_axis_range(
+    price_data: pd.DataFrame,
+    x_range: list[Any] | None,
+    chart_type: str,
+    ma_settings: list[dict[str, Any]],
+) -> list[float] | None:
+    visible_data = get_visible_price_data(price_data, x_range)
+    if visible_data.empty:
+        return None
+
+    series_list: list[pd.Series] = []
+    if chart_type == "캔들차트" and {"High", "Low"}.issubset(visible_data.columns):
+        series_list.extend(
+            [
+                pd.to_numeric(visible_data["High"], errors="coerce"),
+                pd.to_numeric(visible_data["Low"], errors="coerce"),
+            ]
+        )
+    elif "Close" in visible_data.columns:
+        series_list.append(pd.to_numeric(visible_data["Close"], errors="coerce"))
+
+    for ma in ma_settings:
+        if not ma.get("enabled"):
+            continue
+        ma_series = calculate_moving_average(price_data, int(ma.get("window", 20)))
+        if not ma_series.empty:
+            series_list.append(ma_series.loc[visible_data.index.intersection(ma_series.index)])
+
+    if not series_list:
+        return None
+
+    values = pd.concat(series_list).dropna()
+    if values.empty:
+        return None
+
+    min_price = float(values.min())
+    max_price = float(values.max())
+    if min_price == max_price:
+        padding = max(abs(max_price) * 0.02, 0.01)
+    else:
+        padding = max((max_price - min_price) * 0.08, abs((max_price + min_price) / 2) * 0.002, 0.01)
+    lower_bound = min_price - padding
+    if min_price > 0 and lower_bound <= 0:
+        lower_bound = min_price * 0.9
+    return [lower_bound, max_price + padding]
+
+
+def calculate_volume_axis_range(price_data: pd.DataFrame, x_range: list[Any] | None) -> list[float] | None:
+    visible_data = get_visible_price_data(price_data, x_range)
+    if visible_data.empty or "Volume" not in visible_data.columns:
+        return None
+
+    volume = pd.to_numeric(visible_data["Volume"], errors="coerce").dropna()
+    if volume.empty:
+        return None
+
+    max_volume = float(volume.max())
+    if max_volume <= 0:
+        return None
+    return [0, max_volume * 1.15]
+
+
 def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     st.subheader(f"{display_ticker(ticker)} {settings['chart_mode']}")
     with st.spinner("주가 데이터를 불러오는 중입니다..."):
@@ -1757,6 +1826,14 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", row=rsi_row, col=1)
 
     initial_x_range = get_initial_detailed_chart_range(price_data, settings["interval"]) if is_detailed_chart else None
+    axis_x_range = initial_x_range if initial_x_range is not None else None
+    price_axis_range = calculate_price_axis_range(
+        price_data,
+        axis_x_range,
+        settings["chart_type"],
+        settings["ma_settings"] if is_detailed_chart else [],
+    )
+    volume_axis_range = calculate_volume_axis_range(price_data, axis_x_range) if show_volume else None
     fig.update_layout(
         height=780 if is_detailed_chart else 560,
         margin=dict(l=20, r=20, t=45, b=20),
@@ -1769,9 +1846,9 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     )
     if initial_x_range is not None:
         fig.update_xaxes(range=initial_x_range)
-    fig.update_yaxes(tickformat=",.2f", row=1, col=1)
+    fig.update_yaxes(tickformat=",.2f", range=price_axis_range, row=1, col=1)
     if show_volume and volume_row is not None:
-        fig.update_yaxes(tickformat=",.0f", row=volume_row, col=1)
+        fig.update_yaxes(tickformat=",.0f", range=volume_axis_range, row=volume_row, col=1)
     if show_rsi and rsi_row is not None:
         fig.update_yaxes(range=[0, 100], row=rsi_row, col=1)
     st.plotly_chart(
