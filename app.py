@@ -1608,6 +1608,23 @@ def render_header() -> None:
     )
 
 
+def get_initial_detailed_chart_range(price_data: pd.DataFrame, interval: str) -> list[Any] | None:
+    if price_data.empty:
+        return None
+
+    valid_index = price_data.index[price_data["Close"].notna()] if "Close" in price_data.columns else price_data.index
+    if len(valid_index) < 2:
+        return None
+
+    visible_candles = {
+        "1d": 252,
+        "1wk": 156,
+        "1mo": 120,
+    }.get(interval, 252)
+    start_position = max(0, len(valid_index) - visible_candles)
+    return [valid_index[start_position], valid_index[-1]]
+
+
 def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     st.subheader(f"{display_ticker(ticker)} {settings['chart_mode']}")
     with st.spinner("주가 데이터를 불러오는 중입니다..."):
@@ -1739,6 +1756,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         fig.add_hline(y=70, line_dash="dash", line_color="#dc2626", row=rsi_row, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", row=rsi_row, col=1)
 
+    initial_x_range = get_initial_detailed_chart_range(price_data, settings["interval"]) if is_detailed_chart else None
     fig.update_layout(
         height=780 if is_detailed_chart else 560,
         margin=dict(l=20, r=20, t=45, b=20),
@@ -1749,6 +1767,8 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         dragmode="pan" if is_detailed_chart else "zoom",
         template="plotly_white",
     )
+    if initial_x_range is not None:
+        fig.update_xaxes(range=initial_x_range)
     fig.update_yaxes(tickformat=",.2f", row=1, col=1)
     if show_volume and volume_row is not None:
         fig.update_yaxes(tickformat=",.0f", row=volume_row, col=1)
