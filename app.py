@@ -597,12 +597,8 @@ def quote_cards_html(items: Iterable[tuple[str, Any]]) -> str:
         safe_label = escape(str(label))
         safe_value = escape(str(value))
         cards.append(
-            f"""
-            <div class="quote-card">
-                <span class="label">{safe_label}</span>
-                <span class="value">{safe_value}</span>
-            </div>
-            """
+            f'<div class="quote-card"><span class="label">{safe_label}</span>'
+            f'<span class="value">{safe_value}</span></div>'
         )
     return f"<div class=\"quote-card-grid\">{''.join(cards)}</div>"
 
@@ -1726,6 +1722,30 @@ def get_initial_detailed_chart_range(price_data: pd.DataFrame, interval: str) ->
     return [valid_index[start_position], valid_index[-1]]
 
 
+def get_chart_render_limit(interval: str, *, detailed: bool) -> int | None:
+    if detailed:
+        return {
+            "1d": 1260,
+            "1wk": 780,
+            "1mo": 480,
+        }.get(interval, 1260)
+    return {
+        "1d": 2500,
+        "1wk": 1600,
+        "1mo": 900,
+    }.get(interval)
+
+
+def limit_chart_data_for_rendering(price_data: pd.DataFrame, interval: str, *, detailed: bool) -> pd.DataFrame:
+    if price_data.empty:
+        return price_data
+
+    row_limit = get_chart_render_limit(interval, detailed=detailed)
+    if row_limit is None or len(price_data) <= row_limit:
+        return price_data
+    return price_data.tail(row_limit).copy()
+
+
 def get_visible_price_data(price_data: pd.DataFrame, x_range: list[Any] | None) -> pd.DataFrame:
     if price_data.empty or x_range is None:
         return price_data
@@ -1820,6 +1840,7 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
         const mobileHeight = __MOBILE_HEIGHT__;
         let pending = false;
         let adjusting = false;
+        const traceTimeCache = new WeakMap();
 
         function targetHeight() {
             return window.innerWidth <= 768 ? mobileHeight : desktopHeight;
@@ -1848,11 +1869,19 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
             }
         }
 
+        function traceTimes(trace) {
+            if (traceTimeCache.has(trace)) {
+                return traceTimeCache.get(trace);
+            }
+            const times = (trace.x || []).map(toTime);
+            traceTimeCache.set(trace, times);
+            return times;
+        }
+
         function allXTimes(gd) {
             const values = [];
             (gd.data || []).forEach((trace) => {
-                (trace.x || []).forEach((xValue) => {
-                    const timestamp = toTime(xValue);
+                traceTimes(trace).forEach((timestamp) => {
                     if (Number.isFinite(timestamp)) {
                         values.push(timestamp);
                     }
@@ -1894,6 +1923,10 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
             return Number.isFinite(timestamp) && timestamp >= start && timestamp <= end;
         }
 
+        function timestampInRange(timestamp, start, end) {
+            return Number.isFinite(timestamp) && timestamp >= start && timestamp <= end;
+        }
+
         function paddedRange(values, axisType) {
             const cleanValues = values.filter(isNumber).map(Number);
             if (!cleanValues.length) {
@@ -1931,9 +1964,10 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
                 }
 
                 const xValues = trace.x || [];
+                const xTimes = traceTimes(trace);
                 if (trace.type === "candlestick") {
                     for (let index = 0; index < xValues.length; index += 1) {
-                        if (inRange(xValues[index], start, end)) {
+                        if (timestampInRange(xTimes[index], start, end)) {
                             addNumber(values, trace.high && trace.high[index]);
                             addNumber(values, trace.low && trace.low[index]);
                         }
@@ -1943,7 +1977,7 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
 
                 const yValues = trace.y || [];
                 for (let index = 0; index < xValues.length; index += 1) {
-                    if (inRange(xValues[index], start, end)) {
+                    if (timestampInRange(xTimes[index], start, end)) {
                         addNumber(values, yValues[index]);
                     }
                 }
@@ -1961,9 +1995,10 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
 
                 axisName = trace.yaxis || axisName || "y2";
                 const xValues = trace.x || [];
+                const xTimes = traceTimes(trace);
                 const yValues = trace.y || [];
                 for (let index = 0; index < xValues.length; index += 1) {
-                    if (inRange(xValues[index], start, end)) {
+                    if (timestampInRange(xTimes[index], start, end)) {
                         addNumber(values, yValues[index]);
                     }
                 }
@@ -2055,11 +2090,6 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
                     scheduleAdjust();
                 }
             });
-            gd.on("plotly_relayouting", (eventData) => {
-                if (shouldAdjustFromRelayout(eventData)) {
-                    scheduleAdjust();
-                }
-            });
             gd.on("plotly_legendclick", () => window.setTimeout(scheduleAdjust, 0));
             gd.on("plotly_legenddoubleclick", () => window.setTimeout(scheduleAdjust, 0));
             window.addEventListener("resize", scheduleAdjust);
@@ -2122,8 +2152,8 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     is_detailed_chart = settings["chart_mode"] == "자세한 차트"
     show_volume = bool(settings.get("show_volume")) and is_detailed_chart
     show_rsi = bool(settings.get("show_rsi")) and is_detailed_chart
-    chart_data = price_data
-    initial_x_range = get_initial_detailed_chart_range(price_data, settings["interval"]) if is_detailed_chart else None
+    chart_data = limit_chart_data_for_rendering(price_data, settings["interval"], detailed=is_detailed_chart)
+    initial_x_range = get_initial_detailed_chart_range(chart_data, settings["interval"]) if is_detailed_chart else None
 
     subplot_titles = ["가격"]
     row_heights = [1.0]
@@ -2168,7 +2198,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         )
     else:
         fig.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_data.index,
                 y=chart_data["Close"],
                 mode="lines",
@@ -2197,7 +2227,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
             if ma_series.dropna().empty:
                 continue
             fig.add_trace(
-                go.Scatter(
+                go.Scattergl(
                     x=chart_data.index,
                     y=ma_series,
                     mode="lines",
@@ -2227,7 +2257,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         rsi = calculate_rsi(price_data, settings["rsi_period"]).reindex(chart_data.index)
         latest_rsi = rsi.dropna().iloc[-1] if not rsi.dropna().empty else None
         fig.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_data.index,
                 y=rsi,
                 mode="lines",
@@ -2240,18 +2270,19 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         fig.add_hline(y=70, line_dash="dash", line_color="#dc2626", row=rsi_row, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", row=rsi_row, col=1)
 
+    axis_source_data = price_data if is_detailed_chart else chart_data
     price_axis_range = calculate_price_axis_range(
-        price_data,
+        axis_source_data,
         initial_x_range,
         settings["chart_type"],
         settings["ma_settings"] if is_detailed_chart else [],
     )
-    volume_axis_range = calculate_volume_axis_range(price_data, initial_x_range) if show_volume else None
+    volume_axis_range = calculate_volume_axis_range(axis_source_data, initial_x_range) if show_volume else None
     chart_height = 780 if is_detailed_chart else 560
     fig.update_layout(
         height=chart_height,
         margin=dict(l=20, r=20, t=45, b=20),
-        hovermode="x unified",
+        hovermode="x" if is_detailed_chart else "x unified",
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11)),
         xaxis_rangeslider_visible=False,
