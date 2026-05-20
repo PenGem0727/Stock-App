@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 from bs4 import BeautifulSoup
 from plotly.subplots import make_subplots
@@ -37,6 +38,16 @@ INTERVAL_OPTIONS = {
     "일봉": "1d",
     "주봉": "1wk",
     "월봉": "1mo",
+}
+
+AUTO_REFRESH_OPTIONS = {
+    "끄기": 0,
+    "15초": 15,
+    "30초": 30,
+    "1분": 60,
+    "3분": 180,
+    "5분": 300,
+    "10분": 600,
 }
 
 FINANCIAL_NAME_KO = {
@@ -1328,6 +1339,92 @@ def get_market_cap_ranking(source: str = "major") -> pd.DataFrame:
     return ranking
 
 
+def init_moving_average_state() -> None:
+    if "ma_items" not in st.session_state:
+        st.session_state.ma_items = [
+            {"id": 1, "enabled": True, "window": 20},
+            {"id": 2, "enabled": True, "window": 60},
+            {"id": 3, "enabled": True, "window": 120},
+        ]
+    if "ma_next_id" not in st.session_state:
+        st.session_state.ma_next_id = 4
+
+
+def render_moving_average_controls() -> list[dict[str, Any]]:
+    init_moving_average_state()
+
+    add_col, reset_col = st.columns(2)
+    if add_col.button("이동평균선 추가", use_container_width=True):
+        current_windows = [int(item.get("window", 20)) for item in st.session_state.ma_items]
+        next_window = min(max((current_windows[-1] + 20) if current_windows else 20, 2), 300)
+        st.session_state.ma_items.append(
+            {
+                "id": st.session_state.ma_next_id,
+                "enabled": True,
+                "window": next_window,
+            }
+        )
+        st.session_state.ma_next_id += 1
+        st.rerun()
+
+    if reset_col.button("기본값 복원", use_container_width=True):
+        st.session_state.ma_items = [
+            {"id": 1, "enabled": True, "window": 20},
+            {"id": 2, "enabled": True, "window": 60},
+            {"id": 3, "enabled": True, "window": 120},
+        ]
+        st.session_state.ma_next_id = 4
+        st.rerun()
+
+    ma_settings: list[dict[str, Any]] = []
+    if not st.session_state.ma_items:
+        st.caption("표시할 이동평균선이 없습니다. 추가 버튼으로 새 선을 만들 수 있습니다.")
+        return ma_settings
+
+    for idx, item in enumerate(list(st.session_state.ma_items), start=1):
+        item_id = int(item["id"])
+        enabled_key = f"ma_enabled_dynamic_{item_id}"
+        window_key = f"ma_window_dynamic_{item_id}"
+        cols = st.columns([0.95, 1.25, 0.72])
+        enabled = cols[0].checkbox(f"MA {idx}", value=bool(item.get("enabled", True)), key=enabled_key)
+        window = cols[1].number_input(
+            "기간",
+            min_value=2,
+            max_value=300,
+            value=int(item.get("window", 20)),
+            step=1,
+            key=window_key,
+            label_visibility="collapsed",
+        )
+        if cols[2].button("삭제", key=f"ma_remove_{item_id}", use_container_width=True):
+            st.session_state.ma_items = [
+                ma_item for ma_item in st.session_state.ma_items if int(ma_item["id"]) != item_id
+            ]
+            st.rerun()
+
+        item["enabled"] = enabled
+        item["window"] = int(window)
+        ma_settings.append({"enabled": enabled, "window": int(window)})
+
+    return ma_settings
+
+
+def inject_auto_refresh(seconds: int) -> None:
+    if seconds <= 0:
+        return
+    components.html(
+        f"""
+        <script>
+        const refreshMs = {seconds * 1000};
+        window.setTimeout(() => {{
+            window.parent.location.reload();
+        }}, refreshMs);
+        </script>
+        """,
+        height=0,
+    )
+
+
 def render_sidebar() -> dict[str, Any]:
     with st.sidebar:
         st.header("분석 설정")
@@ -1336,41 +1433,50 @@ def render_sidebar() -> dict[str, Any]:
             st.cache_data.clear()
             st.cache_resource.clear()
             st.rerun()
+
+        auto_refresh_label = st.selectbox(
+            "자동 새로고침",
+            list(AUTO_REFRESH_OPTIONS.keys()),
+            index=0,
+            help="선택한 간격마다 페이지를 자동으로 새로고침합니다.",
+        )
         st.divider()
 
-        period_label = st.selectbox("기간 선택", list(PERIOD_OPTIONS.keys()), index=3)
-        interval_label = st.selectbox("봉 종류", list(INTERVAL_OPTIONS.keys()), index=0)
+        chart_mode = st.radio("차트 모드", ["간단한 차트", "자세한 차트"], horizontal=True)
         chart_type = st.radio("차트 종류", ["캔들차트", "라인차트"], horizontal=True)
 
-        st.divider()
-        st.subheader("이동평균선 설정")
-        ma_settings = []
-        defaults = [(20, True), (60, True), (120, True)]
-        for idx, (default_window, default_enabled) in enumerate(defaults, start=1):
-            enabled = st.checkbox(f"MA {idx} 표시", value=default_enabled, key=f"ma_enabled_{idx}")
-            window = st.number_input(
-                f"MA {idx} 기간",
-                min_value=2,
-                max_value=300,
-                value=default_window,
-                step=1,
-                key=f"ma_window_{idx}",
-            )
-            ma_settings.append({"enabled": enabled, "window": int(window)})
+        if chart_mode == "간단한 차트":
+            period_label = st.selectbox("기간 선택", list(PERIOD_OPTIONS.keys()), index=3)
+            interval_label = "일봉"
+            ma_settings = []
+            show_volume = False
+            show_rsi = False
+            rsi_period = 14
+        else:
+            period_label = "최대"
+            interval_label = st.selectbox("봉 종류", list(INTERVAL_OPTIONS.keys()), index=0)
+            show_volume = st.checkbox("거래량 표시", value=True)
 
-        st.divider()
-        st.subheader("RSI 설정")
-        show_rsi = st.checkbox("RSI 표시", value=True)
-        rsi_period = st.number_input("RSI 기간", min_value=2, max_value=100, value=14, step=1)
+            st.divider()
+            st.subheader("이동평균선 설정")
+            ma_settings = render_moving_average_controls()
+
+            st.divider()
+            st.subheader("RSI 설정")
+            show_rsi = st.checkbox("RSI 표시", value=True)
+            rsi_period = st.number_input("RSI 기간", min_value=2, max_value=100, value=14, step=1)
 
     return {
         "ticker": normalize_ticker(ticker or "AAPL"),
+        "auto_refresh_seconds": AUTO_REFRESH_OPTIONS[auto_refresh_label],
+        "chart_mode": chart_mode,
         "period_label": period_label,
         "period": PERIOD_OPTIONS[period_label],
         "interval_label": interval_label,
         "interval": INTERVAL_OPTIONS[interval_label],
         "chart_type": chart_type,
         "ma_settings": ma_settings,
+        "show_volume": show_volume,
         "show_rsi": show_rsi,
         "rsi_period": int(rsi_period),
     }
@@ -1385,7 +1491,7 @@ def render_header() -> None:
 
 
 def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
-    st.subheader(f"{display_ticker(ticker)} 종목 차트")
+    st.subheader(f"{display_ticker(ticker)} {settings['chart_mode']}")
     with st.spinner("주가 데이터를 불러오는 중입니다..."):
         info = get_stock_info(ticker)
         price_data = get_price_data(ticker, settings["period"], settings["interval"])
@@ -1405,16 +1511,34 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     metric_cols[3].metric("52주 최저가", format_price(summary["year_low"], summary["currency"]))
     metric_cols[4].metric("거래량", format_number(summary["volume"], compact=True))
 
-    row_count = 3 if settings["show_rsi"] else 2
-    row_heights = [0.62, 0.2, 0.18] if settings["show_rsi"] else [0.72, 0.28]
-    subplot_titles = ("가격", "거래량", "RSI") if settings["show_rsi"] else ("가격", "거래량")
+    is_detailed_chart = settings["chart_mode"] == "자세한 차트"
+    show_volume = bool(settings.get("show_volume")) and is_detailed_chart
+    show_rsi = bool(settings.get("show_rsi")) and is_detailed_chart
+
+    subplot_titles = ["가격"]
+    row_heights = [1.0]
+    volume_row = None
+    rsi_row = None
+
+    if show_volume:
+        volume_row = len(subplot_titles) + 1
+        subplot_titles.append("거래량")
+    if show_rsi:
+        rsi_row = len(subplot_titles) + 1
+        subplot_titles.append("RSI")
+
+    if show_volume and show_rsi:
+        row_heights = [0.62, 0.2, 0.18]
+    elif show_volume or show_rsi:
+        row_heights = [0.74, 0.26]
+
     fig = make_subplots(
-        rows=row_count,
+        rows=len(subplot_titles),
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.04,
         row_heights=row_heights,
-        subplot_titles=subplot_titles,
+        subplot_titles=tuple(subplot_titles),
     )
 
     if settings["chart_type"] == "캔들차트" and {"Open", "High", "Low", "Close"}.issubset(price_data.columns):
@@ -1445,40 +1569,51 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
             col=1,
         )
 
-    ma_colors = ["#f59e0b", "#10b981", "#7c3aed"]
-    for idx, ma in enumerate(settings["ma_settings"]):
-        if not ma["enabled"]:
-            continue
-        ma_series = calculate_moving_average(price_data, ma["window"])
-        if ma_series.dropna().empty:
-            continue
+    ma_colors = [
+        "#f59e0b",
+        "#10b981",
+        "#7c3aed",
+        "#ef4444",
+        "#0891b2",
+        "#a16207",
+        "#db2777",
+        "#16a34a",
+    ]
+    if is_detailed_chart:
+        for idx, ma in enumerate(settings["ma_settings"]):
+            if not ma["enabled"]:
+                continue
+            ma_series = calculate_moving_average(price_data, ma["window"])
+            if ma_series.dropna().empty:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=price_data.index,
+                    y=ma_series,
+                    mode="lines",
+                    line=dict(width=1.6, color=ma_colors[idx % len(ma_colors)]),
+                    name=f"MA {ma['window']}",
+                ),
+                row=1,
+                col=1,
+            )
+
+    if show_volume and volume_row is not None:
+        volume_colors = np.where(price_data["Close"].diff().fillna(0) >= 0, "#ef4444", "#3b82f6")
         fig.add_trace(
-            go.Scatter(
+            go.Bar(
                 x=price_data.index,
-                y=ma_series,
-                mode="lines",
-                line=dict(width=1.6, color=ma_colors[idx % len(ma_colors)]),
-                name=f"MA {ma['window']}",
+                y=price_data.get("Volume", pd.Series(index=price_data.index, dtype=float)),
+                marker_color=volume_colors,
+                name="거래량",
+                opacity=0.55,
             ),
-            row=1,
+            row=volume_row,
             col=1,
         )
 
-    volume_colors = np.where(price_data["Close"].diff().fillna(0) >= 0, "#ef4444", "#3b82f6")
-    fig.add_trace(
-        go.Bar(
-            x=price_data.index,
-            y=price_data.get("Volume", pd.Series(index=price_data.index, dtype=float)),
-            marker_color=volume_colors,
-            name="거래량",
-            opacity=0.55,
-        ),
-        row=2,
-        col=1,
-    )
-
     latest_rsi = None
-    if settings["show_rsi"]:
+    if show_rsi and rsi_row is not None:
         rsi = calculate_rsi(price_data, settings["rsi_period"])
         latest_rsi = rsi.dropna().iloc[-1] if not rsi.dropna().empty else None
         fig.add_trace(
@@ -1489,26 +1624,34 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
                 line=dict(color="#475569", width=1.6),
                 name=f"RSI {settings['rsi_period']}",
             ),
-            row=3,
+            row=rsi_row,
             col=1,
         )
-        fig.add_hline(y=70, line_dash="dash", line_color="#dc2626", row=3, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", row=3, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="#dc2626", row=rsi_row, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", row=rsi_row, col=1)
 
     fig.update_layout(
-        height=760,
+        height=780 if is_detailed_chart else 560,
         margin=dict(l=20, r=20, t=45, b=20),
         hovermode="x unified",
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis_rangeslider_visible=False,
+        xaxis_rangeslider_visible=is_detailed_chart,
+        dragmode="pan" if is_detailed_chart else "zoom",
         template="plotly_white",
     )
     fig.update_yaxes(tickformat=",.2f", row=1, col=1)
-    fig.update_yaxes(tickformat=",.0f", row=2, col=1)
-    st.plotly_chart(fig, use_container_width=True)
+    if show_volume and volume_row is not None:
+        fig.update_yaxes(tickformat=",.0f", row=volume_row, col=1)
+    if show_rsi and rsi_row is not None:
+        fig.update_yaxes(range=[0, 100], row=rsi_row, col=1)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={"scrollZoom": is_detailed_chart, "displaylogo": False},
+    )
 
-    if settings["show_rsi"]:
+    if show_rsi:
         if latest_rsi is None:
             st.info("RSI 계산에 필요한 데이터가 부족합니다.")
         elif latest_rsi >= 70:
@@ -1688,13 +1831,13 @@ def render_market_cap_tab() -> None:
     if selected_sectors:
         filtered = filtered[filtered["sector"].isin(selected_sectors)]
 
-    top10 = filtered.head(10)
-    if not top10.empty:
+    top20 = filtered.head(20)
+    if not top20.empty:
         fig = go.Figure(
             go.Bar(
-                x=top10["ticker"],
-                y=top10["market_cap"],
-                text=[format_market_cap(value) for value in top10["market_cap"]],
+                x=top20["ticker"],
+                y=top20["market_cap"],
+                text=[format_market_cap(value) for value in top20["market_cap"]],
                 textposition="outside",
                 marker_color="#1d4ed8",
                 hovertemplate="<b>%{x}</b><br>시가총액: %{text}<extra></extra>",
@@ -1741,6 +1884,7 @@ def safe_render(render_func: Any, *args: Any) -> None:
 def main() -> None:
     apply_custom_style()
     settings = render_sidebar()
+    inject_auto_refresh(settings["auto_refresh_seconds"])
     render_header()
 
     tabs = st.tabs(["종목 차트", "재무제표", "기업 개요", "밸류에이션", "시가총액 순위"])
