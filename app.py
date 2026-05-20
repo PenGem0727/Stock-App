@@ -1840,6 +1840,7 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
         const mobileHeight = __MOBILE_HEIGHT__;
         let pending = false;
         let adjusting = false;
+        let activeXRange = null;
         const traceTimeCache = new WeakMap();
 
         function targetHeight() {
@@ -1890,19 +1891,76 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
             return values;
         }
 
+        function normalizeRange(startValue, endValue) {
+            const start = toTime(startValue);
+            const end = toTime(endValue);
+            if (!Number.isFinite(start) || !Number.isFinite(end)) {
+                return null;
+            }
+            return [Math.min(start, end), Math.max(start, end)];
+        }
+
+        function parseRelayoutXRange(eventData) {
+            if (!eventData) {
+                return null;
+            }
+
+            const axisNames = Array.from(
+                new Set(
+                    Object.keys(eventData)
+                        .map((key) => key.match(/^(xaxis\\d*)/))
+                        .filter(Boolean)
+                        .map((match) => match[1])
+                )
+            ).sort((left, right) => {
+                const leftNumber = Number(left.replace("xaxis", "") || "1");
+                const rightNumber = Number(right.replace("xaxis", "") || "1");
+                return rightNumber - leftNumber;
+            });
+
+            for (const axisName of axisNames) {
+                const directRange = eventData[axisName + ".range"];
+                if (Array.isArray(directRange) && directRange.length >= 2) {
+                    const parsed = normalizeRange(directRange[0], directRange[1]);
+                    if (parsed) {
+                        return parsed;
+                    }
+                }
+
+                const start = eventData[axisName + ".range[0]"];
+                const end = eventData[axisName + ".range[1]"];
+                const parsed = normalizeRange(start, end);
+                if (parsed) {
+                    return parsed;
+                }
+            }
+
+            if (Object.keys(eventData).some((key) => key.startsWith("xaxis") && key.endsWith(".autorange"))) {
+                activeXRange = null;
+            }
+            return null;
+        }
+
         function currentXRange(gd) {
+            if (activeXRange) {
+                return activeXRange;
+            }
+
             const layout = gd._fullLayout || gd.layout || {};
             const axisKeys = Object.keys(layout)
                 .filter((key) => /^xaxis\\d*$/.test(key))
-                .sort();
+                .sort((left, right) => {
+                    const leftNumber = Number(left.replace("xaxis", "") || "1");
+                    const rightNumber = Number(right.replace("xaxis", "") || "1");
+                    return rightNumber - leftNumber;
+                });
 
             for (const key of axisKeys) {
                 const axis = layout[key];
                 if (axis && axis.range && axis.range.length >= 2) {
-                    const start = toTime(axis.range[0]);
-                    const end = toTime(axis.range[1]);
-                    if (Number.isFinite(start) && Number.isFinite(end)) {
-                        return [Math.min(start, end), Math.max(start, end)];
+                    const parsed = normalizeRange(axis.range[0], axis.range[1]);
+                    if (parsed) {
+                        return parsed;
                     }
                 }
             }
@@ -2087,6 +2145,10 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
             scheduleAdjust();
             gd.on("plotly_relayout", (eventData) => {
                 if (shouldAdjustFromRelayout(eventData)) {
+                    const parsedRange = parseRelayoutXRange(eventData);
+                    if (parsedRange) {
+                        activeXRange = parsedRange;
+                    }
                     scheduleAdjust();
                 }
             });
@@ -2286,7 +2348,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11)),
         xaxis_rangeslider_visible=False,
-        dragmode="pan" if is_detailed_chart else "zoom",
+        dragmode="pan" if is_detailed_chart else False,
         template="plotly_white",
         uirevision=f"{ticker}-{settings['interval']}-{settings['chart_type']}",
     )
@@ -2306,7 +2368,13 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         st.plotly_chart(
             fig,
             use_container_width=True,
-            config={"scrollZoom": False, "displaylogo": False, "responsive": True},
+            config={
+                "scrollZoom": False,
+                "displayModeBar": False,
+                "displaylogo": False,
+                "doubleClick": False,
+                "responsive": True,
+            },
         )
 
     if show_rsi:
