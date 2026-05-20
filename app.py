@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import time
@@ -11,6 +12,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 from bs4 import BeautifulSoup
 from plotly.subplots import make_subplots
@@ -330,6 +332,86 @@ def apply_custom_style() -> None:
             color: var(--dash-muted);
             font-size: 0.9rem;
         }
+        .quote-card-grid {
+            display: grid;
+            gap: 0.75rem;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            margin: 0.25rem 0 1.05rem;
+        }
+        .quote-card {
+            background: #ffffff;
+            border: 1px solid var(--dash-border);
+            border-radius: 8px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+            min-height: 76px;
+            padding: 0.85rem 0.95rem;
+        }
+        .quote-card .label {
+            color: var(--dash-muted);
+            display: block;
+            font-size: 0.82rem;
+            margin-bottom: 0.32rem;
+        }
+        .quote-card .value {
+            color: var(--dash-ink);
+            display: block;
+            font-size: 1.04rem;
+            font-weight: 700;
+            overflow-wrap: anywhere;
+        }
+        @media (max-width: 768px) {
+            .block-container {
+                padding-left: 0.75rem;
+                padding-right: 0.75rem;
+                padding-top: 0.9rem;
+            }
+            h1 {
+                font-size: 1.75rem !important;
+                line-height: 1.18 !important;
+            }
+            h2, h3 {
+                line-height: 1.25 !important;
+            }
+            .app-subtitle {
+                font-size: 0.88rem;
+                line-height: 1.45;
+                margin-bottom: 0.8rem;
+            }
+            .quote-card-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 0.55rem;
+            }
+            .quote-card {
+                min-height: 66px;
+                padding: 0.72rem 0.78rem;
+            }
+            .quote-card .label {
+                font-size: 0.76rem;
+            }
+            .quote-card .value {
+                font-size: 0.96rem;
+            }
+            div[data-testid="stHorizontalBlock"] {
+                gap: 0.55rem;
+            }
+            div[data-testid="stTabs"] div[role="tablist"] {
+                overflow-x: auto;
+                white-space: nowrap;
+                flex-wrap: nowrap;
+                scrollbar-width: none;
+            }
+            div[data-testid="stTabs"] div[role="tablist"]::-webkit-scrollbar {
+                display: none;
+            }
+            div[data-testid="stTabs"] button[role="tab"] {
+                flex: 0 0 auto;
+                padding-left: 0.45rem;
+                padding-right: 0.45rem;
+            }
+            div[data-testid="stSidebar"] {
+                min-width: min(92vw, 21rem) !important;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -507,6 +589,22 @@ def card_html(label: str, value: Any) -> str:
         <span class="value">{safe_value}</span>
     </div>
     """
+
+
+def quote_cards_html(items: Iterable[tuple[str, Any]]) -> str:
+    cards = []
+    for label, value in items:
+        safe_label = escape(str(label))
+        safe_value = escape(str(value))
+        cards.append(
+            f"""
+            <div class="quote-card">
+                <span class="label">{safe_label}</span>
+                <span class="value">{safe_value}</span>
+            </div>
+            """
+        )
+    return f"<div class=\"quote-card-grid\">{''.join(cards)}</div>"
 
 
 def format_date_column(column: Any) -> str:
@@ -924,15 +1022,18 @@ def build_price_summary(info: dict[str, Any], price_data: pd.DataFrame) -> dict[
 def render_price_summary_cards(ticker: str, info: dict[str, Any], price_data: pd.DataFrame, settings: dict[str, Any]) -> None:
     def draw_cards(latest_info: dict[str, Any]) -> None:
         summary = build_price_summary(latest_info, price_data)
-        metric_cols = st.columns(5)
-        metric_cols[0].metric("현재가", format_price(summary["current_price"], summary["currency"]))
-        metric_cols[1].metric(
-            "전일 대비 등락률",
-            format_percent(summary["change_pct"], already_percent=True),
+        st.markdown(
+            quote_cards_html(
+                [
+                    ("현재가", format_price(summary["current_price"], summary["currency"])),
+                    ("전일 대비 등락률", format_percent(summary["change_pct"], already_percent=True)),
+                    ("52주 최고가", format_price(summary["year_high"], summary["currency"])),
+                    ("52주 최저가", format_price(summary["year_low"], summary["currency"])),
+                    ("거래량", format_number(summary["volume"], compact=True)),
+                ]
+            ),
+            unsafe_allow_html=True,
         )
-        metric_cols[2].metric("52주 최고가", format_price(summary["year_high"], summary["currency"]))
-        metric_cols[3].metric("52주 최저가", format_price(summary["year_low"], summary["currency"]))
-        metric_cols[4].metric("거래량", format_number(summary["volume"], compact=True))
 
     refresh_seconds = int(settings.get("auto_refresh_seconds", 0) or 0)
     if refresh_seconds <= 0:
@@ -1632,78 +1733,6 @@ def get_visible_price_data(price_data: pd.DataFrame, x_range: list[Any] | None) 
     return price_data.loc[(price_data.index >= start) & (price_data.index <= end)]
 
 
-def get_visible_range_preset_options(interval: str) -> tuple[list[str], str]:
-    if interval == "1d":
-        return ["최근 3개월", "최근 6개월", "최근 1년", "최근 2년", "최근 5년", "전체"], "최근 1년"
-    if interval == "1wk":
-        return ["최근 6개월", "최근 1년", "최근 3년", "최근 5년", "최근 10년", "전체"], "최근 3년"
-    return ["최근 1년", "최근 3년", "최근 5년", "최근 10년", "최근 20년", "전체"], "최근 10년"
-
-
-def get_start_date_for_preset(end_date: pd.Timestamp, min_date: pd.Timestamp, preset: str) -> pd.Timestamp:
-    offset_map = {
-        "최근 3개월": pd.DateOffset(months=3),
-        "최근 6개월": pd.DateOffset(months=6),
-        "최근 1년": pd.DateOffset(years=1),
-        "최근 2년": pd.DateOffset(years=2),
-        "최근 3년": pd.DateOffset(years=3),
-        "최근 5년": pd.DateOffset(years=5),
-        "최근 10년": pd.DateOffset(years=10),
-        "최근 20년": pd.DateOffset(years=20),
-    }
-    if preset == "전체" or preset not in offset_map:
-        return min_date
-    return max(min_date, end_date - offset_map[preset])
-
-
-def filter_price_data_by_dates(price_data: pd.DataFrame, start_date: Any, end_date: Any) -> pd.DataFrame:
-    if price_data.empty:
-        return price_data
-    index_dates = pd.Series(price_data.index.date, index=price_data.index)
-    filtered = price_data.loc[(index_dates >= start_date) & (index_dates <= end_date)]
-    return filtered if not filtered.empty else price_data.tail(1)
-
-
-def render_detailed_visible_range_controls(ticker: str, price_data: pd.DataFrame, interval: str) -> pd.DataFrame:
-    if price_data.empty:
-        return price_data
-
-    min_timestamp = pd.Timestamp(price_data.index.min())
-    max_timestamp = pd.Timestamp(price_data.index.max())
-    min_date = min_timestamp.date()
-    max_date = max_timestamp.date()
-    preset_options, default_preset = get_visible_range_preset_options(interval)
-    preset_index = preset_options.index(default_preset) if default_preset in preset_options else 0
-
-    control_cols = st.columns([0.9, 2.1])
-    preset = control_cols[0].selectbox(
-        "표시 범위",
-        preset_options,
-        index=preset_index,
-        key=f"visible_preset_{ticker}_{interval}",
-    )
-    default_start = get_start_date_for_preset(max_timestamp, min_timestamp, preset).date()
-    default_range = (default_start, max_date)
-    selected_range = control_cols[1].slider(
-        "차트 표시 구간",
-        min_value=min_date,
-        max_value=max_date,
-        value=default_range,
-        format="YYYY-MM-DD",
-        key=f"visible_date_range_{ticker}_{interval}_{preset}",
-    )
-    start_date, end_date = selected_range
-    if start_date > end_date:
-        start_date, end_date = end_date, start_date
-
-    visible_data = filter_price_data_by_dates(price_data, start_date, end_date)
-    st.caption(
-        f"표시 중인 데이터: {format_number(len(visible_data), na_text='0')}개 봉 "
-        f"({start_date} ~ {end_date})"
-    )
-    return visible_data
-
-
 def calculate_price_axis_range(
     price_data: pd.DataFrame,
     x_range: list[Any] | None,
@@ -1766,6 +1795,318 @@ def calculate_volume_axis_range(price_data: pd.DataFrame, x_range: list[Any] | N
     return [0, max_volume * 1.15]
 
 
+def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> None:
+    safe_ticker = re.sub(r"[^A-Za-z0-9_-]+", "-", display_ticker(ticker)).strip("-") or "stock"
+    div_id = f"detailed-stock-chart-{safe_ticker.lower()}"
+    mobile_height = 640 if height >= 760 else max(520, height - 80)
+    config = {
+        "scrollZoom": True,
+        "displayModeBar": False,
+        "displaylogo": False,
+        "responsive": True,
+        "doubleClick": "reset",
+    }
+    plot_html = fig.to_html(
+        include_plotlyjs="cdn",
+        full_html=False,
+        config=config,
+        div_id=div_id,
+    )
+    dynamic_axis_script = """
+    <script>
+    (function () {
+        const plotId = __PLOT_ID__;
+        const desktopHeight = __DESKTOP_HEIGHT__;
+        const mobileHeight = __MOBILE_HEIGHT__;
+        let pending = false;
+        let adjusting = false;
+
+        function targetHeight() {
+            return window.innerWidth <= 768 ? mobileHeight : desktopHeight;
+        }
+
+        function toTime(value) {
+            if (value === null || value === undefined) {
+                return NaN;
+            }
+            if (typeof value === "number") {
+                return value;
+            }
+            const parsed = new Date(value).getTime();
+            return Number.isFinite(parsed) ? parsed : NaN;
+        }
+
+        function isNumber(value) {
+            const numeric = Number(value);
+            return Number.isFinite(numeric);
+        }
+
+        function addNumber(values, value) {
+            const numeric = Number(value);
+            if (Number.isFinite(numeric)) {
+                values.push(numeric);
+            }
+        }
+
+        function allXTimes(gd) {
+            const values = [];
+            (gd.data || []).forEach((trace) => {
+                (trace.x || []).forEach((xValue) => {
+                    const timestamp = toTime(xValue);
+                    if (Number.isFinite(timestamp)) {
+                        values.push(timestamp);
+                    }
+                });
+            });
+            return values;
+        }
+
+        function currentXRange(gd) {
+            const layout = gd._fullLayout || gd.layout || {};
+            const axisKeys = Object.keys(layout)
+                .filter((key) => /^xaxis\\d*$/.test(key))
+                .sort();
+
+            for (const key of axisKeys) {
+                const axis = layout[key];
+                if (axis && axis.range && axis.range.length >= 2) {
+                    const start = toTime(axis.range[0]);
+                    const end = toTime(axis.range[1]);
+                    if (Number.isFinite(start) && Number.isFinite(end)) {
+                        return [Math.min(start, end), Math.max(start, end)];
+                    }
+                }
+            }
+
+            const allTimes = allXTimes(gd);
+            if (!allTimes.length) {
+                return null;
+            }
+            return [Math.min(...allTimes), Math.max(...allTimes)];
+        }
+
+        function traceVisible(trace) {
+            return trace.visible !== false && trace.visible !== "legendonly";
+        }
+
+        function inRange(xValue, start, end) {
+            const timestamp = toTime(xValue);
+            return Number.isFinite(timestamp) && timestamp >= start && timestamp <= end;
+        }
+
+        function paddedRange(values, axisType) {
+            const cleanValues = values.filter(isNumber).map(Number);
+            if (!cleanValues.length) {
+                return null;
+            }
+
+            let minValue = Math.min(...cleanValues);
+            let maxValue = Math.max(...cleanValues);
+            let padding;
+            if (minValue === maxValue) {
+                padding = Math.max(Math.abs(maxValue) * 0.02, 0.01);
+            } else {
+                padding = Math.max((maxValue - minValue) * 0.08, Math.abs((maxValue + minValue) / 2) * 0.002, 0.01);
+            }
+
+            let lower = minValue - padding;
+            if (axisType === "price" && minValue > 0 && lower <= 0) {
+                lower = minValue * 0.9;
+            }
+            return [lower, maxValue + padding];
+        }
+
+        function axisLayoutKey(axisName) {
+            if (!axisName || axisName === "y") {
+                return "yaxis";
+            }
+            return "yaxis" + axisName.replace("y", "");
+        }
+
+        function collectMainAxisValues(gd, start, end) {
+            const values = [];
+            (gd.data || []).forEach((trace) => {
+                if (!traceVisible(trace) || (trace.yaxis || "y") !== "y") {
+                    return;
+                }
+
+                const xValues = trace.x || [];
+                if (trace.type === "candlestick") {
+                    for (let index = 0; index < xValues.length; index += 1) {
+                        if (inRange(xValues[index], start, end)) {
+                            addNumber(values, trace.high && trace.high[index]);
+                            addNumber(values, trace.low && trace.low[index]);
+                        }
+                    }
+                    return;
+                }
+
+                const yValues = trace.y || [];
+                for (let index = 0; index < xValues.length; index += 1) {
+                    if (inRange(xValues[index], start, end)) {
+                        addNumber(values, yValues[index]);
+                    }
+                }
+            });
+            return values;
+        }
+
+        function collectNamedAxisValues(gd, start, end, matcher) {
+            const values = [];
+            let axisName = null;
+            (gd.data || []).forEach((trace) => {
+                if (!traceVisible(trace) || !matcher(trace)) {
+                    return;
+                }
+
+                axisName = trace.yaxis || axisName || "y2";
+                const xValues = trace.x || [];
+                const yValues = trace.y || [];
+                for (let index = 0; index < xValues.length; index += 1) {
+                    if (inRange(xValues[index], start, end)) {
+                        addNumber(values, yValues[index]);
+                    }
+                }
+            });
+            return { axisName, values };
+        }
+
+        function adjustAxes() {
+            if (adjusting) {
+                return;
+            }
+
+            const gd = document.getElementById(plotId);
+            if (!gd || !window.Plotly || !gd.data || !gd._fullLayout) {
+                return;
+            }
+
+            const xRange = currentXRange(gd);
+            if (!xRange) {
+                return;
+            }
+
+            const [start, end] = xRange;
+            const updates = { height: targetHeight() };
+            const priceRange = paddedRange(collectMainAxisValues(gd, start, end), "price");
+            if (priceRange) {
+                updates["yaxis.range"] = priceRange;
+            }
+
+            const volume = collectNamedAxisValues(
+                gd,
+                start,
+                end,
+                (trace) => trace.type === "bar" || String(trace.name || "").includes("거래량")
+            );
+            if (volume.axisName && volume.values.length) {
+                const maxVolume = Math.max(...volume.values.filter(isNumber).map(Number));
+                if (Number.isFinite(maxVolume) && maxVolume > 0) {
+                    updates[axisLayoutKey(volume.axisName) + ".range"] = [0, maxVolume * 1.15];
+                }
+            }
+
+            const rsi = collectNamedAxisValues(
+                gd,
+                start,
+                end,
+                (trace) => String(trace.name || "").startsWith("RSI")
+            );
+            if (rsi.axisName) {
+                updates[axisLayoutKey(rsi.axisName) + ".range"] = [0, 100];
+            }
+
+            adjusting = true;
+            Plotly.relayout(gd, updates)
+                .catch(() => {})
+                .finally(() => {
+                    adjusting = false;
+                });
+        }
+
+        function scheduleAdjust() {
+            if (pending) {
+                return;
+            }
+            pending = true;
+            window.requestAnimationFrame(() => {
+                pending = false;
+                adjustAxes();
+            });
+        }
+
+        function shouldAdjustFromRelayout(eventData) {
+            if (!eventData) {
+                return false;
+            }
+            return Object.keys(eventData).some((key) => key.startsWith("xaxis"));
+        }
+
+        function install() {
+            const gd = document.getElementById(plotId);
+            if (!gd || !window.Plotly || !gd._fullLayout) {
+                window.setTimeout(install, 80);
+                return;
+            }
+
+            scheduleAdjust();
+            gd.on("plotly_relayout", (eventData) => {
+                if (shouldAdjustFromRelayout(eventData)) {
+                    scheduleAdjust();
+                }
+            });
+            gd.on("plotly_relayouting", (eventData) => {
+                if (shouldAdjustFromRelayout(eventData)) {
+                    scheduleAdjust();
+                }
+            });
+            gd.on("plotly_legendclick", () => window.setTimeout(scheduleAdjust, 0));
+            gd.on("plotly_legenddoubleclick", () => window.setTimeout(scheduleAdjust, 0));
+            window.addEventListener("resize", scheduleAdjust);
+        }
+
+        install();
+    })();
+    </script>
+    """
+    dynamic_axis_script = (
+        dynamic_axis_script.replace("__PLOT_ID__", json.dumps(div_id))
+        .replace("__DESKTOP_HEIGHT__", str(height))
+        .replace("__MOBILE_HEIGHT__", str(mobile_height))
+    )
+    chart_html = f"""
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        html, body {{
+            background: transparent;
+            margin: 0;
+            overflow: hidden;
+            padding: 0;
+        }}
+        #{div_id} {{
+            height: {height}px !important;
+            touch-action: none;
+            width: 100% !important;
+        }}
+        .modebar {{
+            display: none !important;
+        }}
+        @media (max-width: 768px) {{
+            #{div_id} {{
+                height: {mobile_height}px !important;
+            }}
+            .legend text {{
+                font-size: 10px !important;
+            }}
+        }}
+    </style>
+    {plot_html}
+    {dynamic_axis_script}
+    """
+    components.html(chart_html, height=height, scrolling=False)
+    st.caption("차트 안에서 드래그하면 좌우 이동, 마우스 휠이나 핀치로 확대·축소할 수 있습니다. 가격축과 거래량축은 현재 보이는 구간에 맞춰 자동 조정됩니다.")
+
+
 def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     st.subheader(f"{display_ticker(ticker)} {settings['chart_mode']}")
     with st.spinner("주가 데이터를 불러오는 중입니다..."):
@@ -1781,11 +2122,8 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     is_detailed_chart = settings["chart_mode"] == "자세한 차트"
     show_volume = bool(settings.get("show_volume")) and is_detailed_chart
     show_rsi = bool(settings.get("show_rsi")) and is_detailed_chart
-    chart_data = (
-        render_detailed_visible_range_controls(ticker, price_data, settings["interval"])
-        if is_detailed_chart
-        else price_data
-    )
+    chart_data = price_data
+    initial_x_range = get_initial_detailed_chart_range(price_data, settings["interval"]) if is_detailed_chart else None
 
     subplot_titles = ["가격"]
     row_heights = [1.0]
@@ -1903,34 +2241,42 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", row=rsi_row, col=1)
 
     price_axis_range = calculate_price_axis_range(
-        chart_data,
-        None,
+        price_data,
+        initial_x_range,
         settings["chart_type"],
         settings["ma_settings"] if is_detailed_chart else [],
     )
-    volume_axis_range = calculate_volume_axis_range(chart_data, None) if show_volume else None
+    volume_axis_range = calculate_volume_axis_range(price_data, initial_x_range) if show_volume else None
+    chart_height = 780 if is_detailed_chart else 560
     fig.update_layout(
-        height=780 if is_detailed_chart else 560,
+        height=chart_height,
         margin=dict(l=20, r=20, t=45, b=20),
         hovermode="x unified",
         showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11)),
         xaxis_rangeslider_visible=False,
         dragmode="pan" if is_detailed_chart else "zoom",
         template="plotly_white",
+        uirevision=f"{ticker}-{settings['interval']}-{settings['chart_type']}",
     )
-    if is_detailed_chart and not chart_data.empty:
-        fig.update_xaxes(range=[chart_data.index.min(), chart_data.index.max()])
+    fig.update_xaxes(rangeslider_visible=False)
+    if is_detailed_chart and initial_x_range:
+        fig.update_xaxes(range=initial_x_range)
+        fig.update_yaxes(fixedrange=True)
     fig.update_yaxes(tickformat=",.2f", range=price_axis_range, row=1, col=1)
     if show_volume and volume_row is not None:
         fig.update_yaxes(tickformat=",.0f", range=volume_axis_range, row=volume_row, col=1)
     if show_rsi and rsi_row is not None:
         fig.update_yaxes(range=[0, 100], row=rsi_row, col=1)
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={"scrollZoom": is_detailed_chart, "displaylogo": False},
-    )
+
+    if is_detailed_chart:
+        render_dynamic_plotly_chart(fig, ticker=ticker, height=chart_height)
+    else:
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={"scrollZoom": False, "displaylogo": False, "responsive": True},
+        )
 
     if show_rsi:
         if latest_rsi is None:
