@@ -1632,6 +1632,78 @@ def get_visible_price_data(price_data: pd.DataFrame, x_range: list[Any] | None) 
     return price_data.loc[(price_data.index >= start) & (price_data.index <= end)]
 
 
+def get_visible_range_preset_options(interval: str) -> tuple[list[str], str]:
+    if interval == "1d":
+        return ["최근 3개월", "최근 6개월", "최근 1년", "최근 2년", "최근 5년", "전체"], "최근 1년"
+    if interval == "1wk":
+        return ["최근 6개월", "최근 1년", "최근 3년", "최근 5년", "최근 10년", "전체"], "최근 3년"
+    return ["최근 1년", "최근 3년", "최근 5년", "최근 10년", "최근 20년", "전체"], "최근 10년"
+
+
+def get_start_date_for_preset(end_date: pd.Timestamp, min_date: pd.Timestamp, preset: str) -> pd.Timestamp:
+    offset_map = {
+        "최근 3개월": pd.DateOffset(months=3),
+        "최근 6개월": pd.DateOffset(months=6),
+        "최근 1년": pd.DateOffset(years=1),
+        "최근 2년": pd.DateOffset(years=2),
+        "최근 3년": pd.DateOffset(years=3),
+        "최근 5년": pd.DateOffset(years=5),
+        "최근 10년": pd.DateOffset(years=10),
+        "최근 20년": pd.DateOffset(years=20),
+    }
+    if preset == "전체" or preset not in offset_map:
+        return min_date
+    return max(min_date, end_date - offset_map[preset])
+
+
+def filter_price_data_by_dates(price_data: pd.DataFrame, start_date: Any, end_date: Any) -> pd.DataFrame:
+    if price_data.empty:
+        return price_data
+    index_dates = pd.Series(price_data.index.date, index=price_data.index)
+    filtered = price_data.loc[(index_dates >= start_date) & (index_dates <= end_date)]
+    return filtered if not filtered.empty else price_data.tail(1)
+
+
+def render_detailed_visible_range_controls(ticker: str, price_data: pd.DataFrame, interval: str) -> pd.DataFrame:
+    if price_data.empty:
+        return price_data
+
+    min_timestamp = pd.Timestamp(price_data.index.min())
+    max_timestamp = pd.Timestamp(price_data.index.max())
+    min_date = min_timestamp.date()
+    max_date = max_timestamp.date()
+    preset_options, default_preset = get_visible_range_preset_options(interval)
+    preset_index = preset_options.index(default_preset) if default_preset in preset_options else 0
+
+    control_cols = st.columns([0.9, 2.1])
+    preset = control_cols[0].selectbox(
+        "표시 범위",
+        preset_options,
+        index=preset_index,
+        key=f"visible_preset_{ticker}_{interval}",
+    )
+    default_start = get_start_date_for_preset(max_timestamp, min_timestamp, preset).date()
+    default_range = (default_start, max_date)
+    selected_range = control_cols[1].slider(
+        "차트 표시 구간",
+        min_value=min_date,
+        max_value=max_date,
+        value=default_range,
+        format="YYYY-MM-DD",
+        key=f"visible_date_range_{ticker}_{interval}_{preset}",
+    )
+    start_date, end_date = selected_range
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    visible_data = filter_price_data_by_dates(price_data, start_date, end_date)
+    st.caption(
+        f"표시 중인 데이터: {format_number(len(visible_data), na_text='0')}개 봉 "
+        f"({start_date} ~ {end_date})"
+    )
+    return visible_data
+
+
 def calculate_price_axis_range(
     price_data: pd.DataFrame,
     x_range: list[Any] | None,
@@ -1709,6 +1781,11 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     is_detailed_chart = settings["chart_mode"] == "자세한 차트"
     show_volume = bool(settings.get("show_volume")) and is_detailed_chart
     show_rsi = bool(settings.get("show_rsi")) and is_detailed_chart
+    chart_data = (
+        render_detailed_visible_range_controls(ticker, price_data, settings["interval"])
+        if is_detailed_chart
+        else price_data
+    )
 
     subplot_titles = ["가격"]
     row_heights = [1.0]
@@ -1736,14 +1813,14 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         subplot_titles=tuple(subplot_titles),
     )
 
-    if settings["chart_type"] == "캔들차트" and {"Open", "High", "Low", "Close"}.issubset(price_data.columns):
+    if settings["chart_type"] == "캔들차트" and {"Open", "High", "Low", "Close"}.issubset(chart_data.columns):
         fig.add_trace(
             go.Candlestick(
-                x=price_data.index,
-                open=price_data["Open"],
-                high=price_data["High"],
-                low=price_data["Low"],
-                close=price_data["Close"],
+                x=chart_data.index,
+                open=chart_data["Open"],
+                high=chart_data["High"],
+                low=chart_data["Low"],
+                close=chart_data["Close"],
                 name="가격",
                 increasing_line_color="#dc2626",
                 decreasing_line_color="#2563eb",
@@ -1754,8 +1831,8 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     else:
         fig.add_trace(
             go.Scatter(
-                x=price_data.index,
-                y=price_data["Close"],
+                x=chart_data.index,
+                y=chart_data["Close"],
                 mode="lines",
                 line=dict(color="#1d4ed8", width=2),
                 name="종가",
@@ -1778,12 +1855,12 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         for idx, ma in enumerate(settings["ma_settings"]):
             if not ma["enabled"]:
                 continue
-            ma_series = calculate_moving_average(price_data, ma["window"])
+            ma_series = calculate_moving_average(price_data, ma["window"]).reindex(chart_data.index)
             if ma_series.dropna().empty:
                 continue
             fig.add_trace(
                 go.Scatter(
-                    x=price_data.index,
+                    x=chart_data.index,
                     y=ma_series,
                     mode="lines",
                     line=dict(width=1.6, color=ma_colors[idx % len(ma_colors)]),
@@ -1794,11 +1871,11 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
             )
 
     if show_volume and volume_row is not None:
-        volume_colors = np.where(price_data["Close"].diff().fillna(0) >= 0, "#ef4444", "#3b82f6")
+        volume_colors = np.where(chart_data["Close"].diff().fillna(0) >= 0, "#ef4444", "#3b82f6")
         fig.add_trace(
             go.Bar(
-                x=price_data.index,
-                y=price_data.get("Volume", pd.Series(index=price_data.index, dtype=float)),
+                x=chart_data.index,
+                y=chart_data.get("Volume", pd.Series(index=chart_data.index, dtype=float)),
                 marker_color=volume_colors,
                 name="거래량",
                 opacity=0.55,
@@ -1809,11 +1886,11 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
 
     latest_rsi = None
     if show_rsi and rsi_row is not None:
-        rsi = calculate_rsi(price_data, settings["rsi_period"])
+        rsi = calculate_rsi(price_data, settings["rsi_period"]).reindex(chart_data.index)
         latest_rsi = rsi.dropna().iloc[-1] if not rsi.dropna().empty else None
         fig.add_trace(
             go.Scatter(
-                x=price_data.index,
+                x=chart_data.index,
                 y=rsi,
                 mode="lines",
                 line=dict(color="#475569", width=1.6),
@@ -1825,27 +1902,25 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         fig.add_hline(y=70, line_dash="dash", line_color="#dc2626", row=rsi_row, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", row=rsi_row, col=1)
 
-    initial_x_range = get_initial_detailed_chart_range(price_data, settings["interval"]) if is_detailed_chart else None
-    axis_x_range = initial_x_range if initial_x_range is not None else None
     price_axis_range = calculate_price_axis_range(
-        price_data,
-        axis_x_range,
+        chart_data,
+        None,
         settings["chart_type"],
         settings["ma_settings"] if is_detailed_chart else [],
     )
-    volume_axis_range = calculate_volume_axis_range(price_data, axis_x_range) if show_volume else None
+    volume_axis_range = calculate_volume_axis_range(chart_data, None) if show_volume else None
     fig.update_layout(
         height=780 if is_detailed_chart else 560,
         margin=dict(l=20, r=20, t=45, b=20),
         hovermode="x unified",
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis_rangeslider_visible=is_detailed_chart,
+        xaxis_rangeslider_visible=False,
         dragmode="pan" if is_detailed_chart else "zoom",
         template="plotly_white",
     )
-    if initial_x_range is not None:
-        fig.update_xaxes(range=initial_x_range)
+    if is_detailed_chart and not chart_data.empty:
+        fig.update_xaxes(range=[chart_data.index.min(), chart_data.index.max()])
     fig.update_yaxes(tickformat=",.2f", range=price_axis_range, row=1, col=1)
     if show_volume and volume_row is not None:
         fig.update_yaxes(tickformat=",.0f", range=volume_axis_range, row=volume_row, col=1)
