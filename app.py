@@ -1725,10 +1725,10 @@ def get_initial_detailed_chart_range(price_data: pd.DataFrame, interval: str) ->
 def get_chart_render_limit(interval: str, *, detailed: bool) -> int | None:
     if detailed:
         return {
-            "1d": 1260,
-            "1wk": 780,
-            "1mo": 480,
-        }.get(interval, 1260)
+            "1d": 5000,
+            "1wk": None,
+            "1mo": None,
+        }.get(interval, 5000)
     return {
         "1d": 2500,
         "1wk": 1600,
@@ -1841,6 +1841,7 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
         let pending = false;
         let adjusting = false;
         let activeXRange = null;
+        let debounceHandle = null;
         const traceTimeCache = new WeakMap();
 
         function targetHeight() {
@@ -2014,6 +2015,13 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
             return "yaxis" + axisName.replace("y", "");
         }
 
+        function setAxisRange(updates, axisName, range) {
+            const layoutKey = axisLayoutKey(axisName);
+            updates[layoutKey + ".autorange"] = false;
+            updates[layoutKey + ".range[0]"] = range[0];
+            updates[layoutKey + ".range[1]"] = range[1];
+        }
+
         function collectMainAxisValues(gd, start, end) {
             const values = [];
             (gd.data || []).forEach((trace) => {
@@ -2083,7 +2091,7 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
             const updates = { height: targetHeight() };
             const priceRange = paddedRange(collectMainAxisValues(gd, start, end), "price");
             if (priceRange) {
-                updates["yaxis.range"] = priceRange;
+                setAxisRange(updates, "y", priceRange);
             }
 
             const volume = collectNamedAxisValues(
@@ -2095,7 +2103,7 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
             if (volume.axisName && volume.values.length) {
                 const maxVolume = Math.max(...volume.values.filter(isNumber).map(Number));
                 if (Number.isFinite(maxVolume) && maxVolume > 0) {
-                    updates[axisLayoutKey(volume.axisName) + ".range"] = [0, maxVolume * 1.15];
+                    setAxisRange(updates, volume.axisName, [0, maxVolume * 1.15]);
                 }
             }
 
@@ -2106,7 +2114,7 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
                 (trace) => String(trace.name || "").startsWith("RSI")
             );
             if (rsi.axisName) {
-                updates[axisLayoutKey(rsi.axisName) + ".range"] = [0, 100];
+                setAxisRange(updates, rsi.axisName, [0, 100]);
             }
 
             adjusting = true;
@@ -2117,7 +2125,12 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
                 });
         }
 
-        function scheduleAdjust() {
+        function scheduleAdjust(delayMs = 0) {
+            if (delayMs > 0) {
+                window.clearTimeout(debounceHandle);
+                debounceHandle = window.setTimeout(() => scheduleAdjust(0), delayMs);
+                return;
+            }
             if (pending) {
                 return;
             }
@@ -2150,6 +2163,15 @@ def render_dynamic_plotly_chart(fig: go.Figure, *, ticker: str, height: int) -> 
                         activeXRange = parsedRange;
                     }
                     scheduleAdjust();
+                }
+            });
+            gd.on("plotly_relayouting", (eventData) => {
+                if (shouldAdjustFromRelayout(eventData)) {
+                    const parsedRange = parseRelayoutXRange(eventData);
+                    if (parsedRange) {
+                        activeXRange = parsedRange;
+                    }
+                    scheduleAdjust(80);
                 }
             });
             gd.on("plotly_legendclick", () => window.setTimeout(scheduleAdjust, 0));
