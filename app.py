@@ -1843,6 +1843,13 @@ def series_to_json_values(series: pd.Series) -> list[float | None]:
     return [json_safe_number(value) for value in series]
 
 
+def format_simple_chart_x(index: pd.Index, interval: str) -> list[str]:
+    timestamps = pd.to_datetime(index)
+    if interval in {"5m", "15m", "30m", "60m", "90m", "1h"}:
+        return [timestamp.strftime("%m-%d %H:%M") for timestamp in timestamps]
+    return [timestamp.strftime("%Y-%m-%d") for timestamp in timestamps]
+
+
 def build_detailed_chart_payload(
     price_data: pd.DataFrame,
     settings: dict[str, Any],
@@ -2040,6 +2047,30 @@ def render_virtualized_detailed_chart(ticker: str, price_data: pd.DataFrame, set
             return values.map(Number).filter((value) => Number.isFinite(value));
         }}
 
+        function formatCompact(value) {{
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) return "데이터 없음";
+            const absolute = Math.abs(numeric);
+            if (absolute >= 1e9) return (numeric / 1e9).toFixed(2).replace(/\\.00$/, "") + "B";
+            if (absolute >= 1e6) return (numeric / 1e6).toFixed(2).replace(/\\.00$/, "") + "M";
+            if (absolute >= 1e3) return (numeric / 1e3).toFixed(2).replace(/\\.00$/, "") + "K";
+            return numeric.toLocaleString();
+        }}
+
+        function formatFixed(value, digits = 2) {{
+            const numeric = Number(value);
+            return Number.isFinite(numeric) ? numeric.toFixed(digits) : "데이터 없음";
+        }}
+
+        function hoverCustomData(bounds) {{
+            const volume = slice(source.volume, bounds);
+            const rsi = slice(chart.rsi, bounds);
+            return volume.map((value, index) => [
+                formatCompact(value),
+                formatFixed(rsi[index], 1)
+            ]);
+        }}
+
         function paddedRange(values, axisType) {{
             const clean = cleanNumbers(values);
             if (!clean.length) return null;
@@ -2085,6 +2116,7 @@ def render_virtualized_detailed_chart(ticker: str, price_data: pd.DataFrame, set
 
         function makeTraceData(bounds) {{
             const xValues = slice(source.x, bounds);
+            const customData = hoverCustomData(bounds);
             const traces = [];
             const priceRow = rowByKind("price");
             if (chart.chartType === "캔들차트") {{
@@ -2099,7 +2131,16 @@ def render_virtualized_detailed_chart(ticker: str, price_data: pd.DataFrame, set
                     decreasing: {{ line: {{ color: "#2563eb" }} }},
                     name: "가격",
                     xaxis: xTraceName(priceRow),
-                    yaxis: yTraceName(priceRow)
+                    yaxis: yTraceName(priceRow),
+                    customdata: customData,
+                    hovertemplate:
+                        "%{{x}}<br>" +
+                        "open: %{{open:.2f}}<br>" +
+                        "high: %{{high:.2f}}<br>" +
+                        "low: %{{low:.2f}}<br>" +
+                        "close: %{{close:.2f}}<br>" +
+                        "거래량: %{{customdata[0]}}<br>" +
+                        "RSI: %{{customdata[1]}}<extra>가격</extra>"
                 }});
             }} else {{
                 traces.push({{
@@ -2110,7 +2151,13 @@ def render_virtualized_detailed_chart(ticker: str, price_data: pd.DataFrame, set
                     line: {{ color: "#1d4ed8", width: 2 }},
                     name: "종가",
                     xaxis: xTraceName(priceRow),
-                    yaxis: yTraceName(priceRow)
+                    yaxis: yTraceName(priceRow),
+                    customdata: customData,
+                    hovertemplate:
+                        "%{{x}}<br>" +
+                        "종가: %{{y:.2f}}<br>" +
+                        "거래량: %{{customdata[0]}}<br>" +
+                        "RSI: %{{customdata[1]}}<extra>가격</extra>"
                 }});
             }}
 
@@ -2123,7 +2170,8 @@ def render_virtualized_detailed_chart(ticker: str, price_data: pd.DataFrame, set
                     line: {{ color: ma.color, width: 1.6 }},
                     name: ma.name,
                     xaxis: xTraceName(priceRow),
-                    yaxis: yTraceName(priceRow)
+                    yaxis: yTraceName(priceRow),
+                    hovertemplate: "%{{x}}<br>%{{fullData.name}}: %{{y:.2f}}<extra></extra>"
                 }});
             }});
 
@@ -2138,11 +2186,13 @@ def render_virtualized_detailed_chart(ticker: str, price_data: pd.DataFrame, set
                     type: "bar",
                     x: xValues,
                     y: slice(source.volume, bounds),
-                    marker: {{ color: colors }},
-                    opacity: 0.48,
+                    marker: {{ color: colors, line: {{ width: 0 }} }},
+                    opacity: 0.72,
                     name: "거래량",
                     xaxis: xTraceName(volumeRow),
-                    yaxis: yTraceName(volumeRow)
+                    yaxis: yTraceName(volumeRow),
+                    customdata: slice(source.volume, bounds).map(formatCompact),
+                    hovertemplate: "%{{x}}<br>거래량: %{{customdata}}<extra></extra>"
                 }});
             }}
 
@@ -2156,7 +2206,8 @@ def render_virtualized_detailed_chart(ticker: str, price_data: pd.DataFrame, set
                     line: {{ color: "#475569", width: 1.5 }},
                     name: "RSI " + chart.rsiPeriod,
                     xaxis: xTraceName(rsiRow),
-                    yaxis: yTraceName(rsiRow)
+                    yaxis: yTraceName(rsiRow),
+                    hovertemplate: "%{{x}}<br>RSI: %{{y:.1f}}<extra></extra>"
                 }});
                 traces.push({{
                     type: "scattergl",
@@ -2190,7 +2241,7 @@ def render_virtualized_detailed_chart(ticker: str, price_data: pd.DataFrame, set
                 dragmode: "pan",
                 height: window.innerWidth <= 768 ? {mobile_height} : {chart_height},
                 hovermode: "x",
-                margin: {{ l: 44, r: 20, t: 44, b: 36 }},
+                margin: {{ l: 72, r: 20, t: 44, b: 36 }},
                 paper_bgcolor: "white",
                 plot_bgcolor: "white",
                 showlegend: true,
@@ -2221,7 +2272,7 @@ def render_virtualized_detailed_chart(ticker: str, price_data: pd.DataFrame, set
                     domain: domainFor(index, rows.length),
                     fixedrange: false,
                     gridcolor: "#e2e8f0",
-                    tickformat: row.kind === "volume" ? ",.0f" : ",.2f",
+                    tickformat: row.kind === "volume" ? "~s" : ",.2f",
                     zeroline: false,
                     range: manualRanges[yKey] || yRange
                 }};
@@ -2761,6 +2812,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         return
 
     chart_data = limit_chart_data_for_rendering(price_data, settings["interval"], detailed=is_detailed_chart)
+    chart_x = format_simple_chart_x(chart_data.index, settings["interval"])
     initial_x_range = get_initial_detailed_chart_range(chart_data, settings["interval"]) if is_detailed_chart else None
 
     subplot_titles = ["가격"]
@@ -2792,7 +2844,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     if settings["chart_type"] == "캔들차트" and {"Open", "High", "Low", "Close"}.issubset(chart_data.columns):
         fig.add_trace(
             go.Candlestick(
-                x=chart_data.index,
+                x=chart_x,
                 open=chart_data["Open"],
                 high=chart_data["High"],
                 low=chart_data["Low"],
@@ -2807,7 +2859,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
     else:
         fig.add_trace(
             go.Scattergl(
-                x=chart_data.index,
+                x=chart_x,
                 y=chart_data["Close"],
                 mode="lines",
                 line=dict(color="#1d4ed8", width=2),
@@ -2836,7 +2888,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
                 continue
             fig.add_trace(
                 go.Scattergl(
-                    x=chart_data.index,
+                    x=chart_x,
                     y=ma_series,
                     mode="lines",
                     line=dict(width=1.6, color=ma_colors[idx % len(ma_colors)]),
@@ -2850,7 +2902,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         volume_colors = np.where(chart_data["Close"].diff().fillna(0) >= 0, "#ef4444", "#3b82f6")
         fig.add_trace(
             go.Bar(
-                x=chart_data.index,
+                x=chart_x,
                 y=chart_data.get("Volume", pd.Series(index=chart_data.index, dtype=float)),
                 marker_color=volume_colors,
                 name="거래량",
@@ -2866,7 +2918,7 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         latest_rsi = rsi.dropna().iloc[-1] if not rsi.dropna().empty else None
         fig.add_trace(
             go.Scattergl(
-                x=chart_data.index,
+                x=chart_x,
                 y=rsi,
                 mode="lines",
                 line=dict(color="#475569", width=1.6),
@@ -2899,6 +2951,12 @@ def render_chart_tab(ticker: str, settings: dict[str, Any]) -> None:
         uirevision=f"{ticker}-{settings['interval']}-{settings['chart_type']}",
     )
     fig.update_xaxes(rangeslider_visible=False)
+    if not is_detailed_chart:
+        fig.update_xaxes(
+            type="category",
+            categoryorder="array",
+            categoryarray=chart_x,
+        )
     if is_detailed_chart and initial_x_range:
         fig.update_xaxes(range=initial_x_range)
         fig.update_yaxes(fixedrange=True)
